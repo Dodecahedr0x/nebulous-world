@@ -16,16 +16,25 @@ export const stakeSchema = z.object({
 
 export const unstakeSchema = z.object({
   stakeId: z.string().min(1),
-  // Omitted withdraws the whole stake; a smaller value does a partial
-  // withdrawal, mirroring withdraw_tag_stake's on-chain `amount` param.
-  amount: z.number().positive().optional(),
 });
 
 export const unvoteSchema = z.object({
   voteId: z.string().min(1),
-  // Omitted withdraws the whole vote; a smaller value does a partial
-  // withdrawal, mirroring withdraw_vote's on-chain `amount` param.
-  amount: z.number().positive().optional(),
+});
+
+// Withdraws `amount` (up to the full active total, possibly spanning more
+// than one active row) off a (user, target)'s aggregated position — see
+// indexer/src/handlers/votes.rs and stakes.rs's withdraw_partial doc
+// comments. Used by the profile page's "Your stakes" unstake action, which
+// withdraws this same amount on-chain.
+export const unstakePartialSchema = z.object({
+  appTagId: z.string().min(1),
+  amount: z.number().positive().max(1_000_000_000),
+});
+
+export const unvotePartialSchema = z.object({
+  appId: z.string().min(1),
+  amount: z.number().positive().max(1_000_000_000),
 });
 
 export const trackViewSchema = z.object({
@@ -120,6 +129,13 @@ export const buildBuyNebTxSchema = z.object({
 
 export const submitTxSchema = z.object({
   signedTransaction: z.string().min(1),
+});
+
+export const authVerifySchema = z.object({
+  wallet: z.string().min(32).max(64),
+  signature: z.string().min(32).max(200),
+  nonce: z.string().min(8),
+  message: z.string().min(8).max(1000),
 });
 
 // Filters are either onchain (tags, and the token stake behind them) or

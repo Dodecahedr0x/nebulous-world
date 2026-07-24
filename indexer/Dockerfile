@@ -1,7 +1,11 @@
 # Builds the Carbon indexer as a standalone binary for Render's Docker
-# runtime (Render has no native Rust buildpack). Build context is this
-# directory (see render.yaml's dockerContext: indexer) — paths below are
-# relative to indexer/, not the repo root.
+# runtime (Render has no native Rust buildpack). Build context is the repo
+# root (see render.yaml's dockerContext: .) — paths below are root-relative,
+# not relative to indexer/ — because indexer/Cargo.toml is a member of the
+# root Cargo workspace (see /Cargo.toml) and depends on two of that
+# workspace's other members via path (`../programs/nebulous_world`,
+# `decoder`), so the build needs the root manifest/lockfile plus every
+# member's source, not just indexer/'s own.
 #
 # sqlx::migrate!() embeds migrations/*.sql into the binary at compile time,
 # so the runtime image needs nothing beyond the compiled executable. The
@@ -18,9 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY decoder ./decoder
-COPY src ./src
-COPY migrations ./migrations
+COPY programs/nebulous_world ./programs/nebulous_world
+COPY indexer/Cargo.toml ./indexer/Cargo.toml
+COPY indexer/decoder ./indexer/decoder
+COPY indexer/src ./indexer/src
+COPY indexer/migrations ./indexer/migrations
 
 RUN cargo build --release --bin indexer
 
@@ -38,13 +44,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /build/target/release/indexer /usr/local/bin/indexer
 
 WORKDIR /app/dlmm-bridge
-COPY dlmm-bridge/package.json dlmm-bridge/package-lock.json* ./
+COPY indexer/dlmm-bridge/package.json indexer/dlmm-bridge/package-lock.json* ./
 # Not --omit=dev: there's no separate build step, `tsx` (a devDependency,
 # same as in app/package.json) runs src/index.ts directly at container
 # startup too — see src/dlmm_bridge.rs's spawn().
 RUN npm install
-COPY dlmm-bridge/src ./src
-COPY dlmm-bridge/tsconfig.json ./
+COPY indexer/dlmm-bridge/src ./src
+COPY indexer/dlmm-bridge/tsconfig.json ./
 RUN chown -R indexer:indexer /app
 
 USER indexer

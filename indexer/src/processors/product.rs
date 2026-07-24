@@ -123,6 +123,7 @@ async fn upsert_user_by_wallet(pool: &PgPool, wallet: &str) -> anyhow::Result<St
 /// a harmless no-op, not a real update.
 pub async fn sync_app_from_init(
     pool: &PgPool,
+    http: &reqwest::Client,
     decoded: &InitApp,
     payer: &Pubkey,
     memo_text: Option<&str>,
@@ -153,7 +154,7 @@ pub async fn sync_app_from_init(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "solana".to_string());
 
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         INSERT INTO "App"
             (id, slug, name, tagline, description, url, "iconUrl", category, chain,
@@ -177,6 +178,24 @@ pub async fn sync_app_from_init(
 
     log::info!("synced App {} (slug {slug}) from init_app", decoded.app_id);
 
+    // Fetch the app's own OpenGraph metadata in the background to fill in
+    // whichever of icon/tagline/description the memo didn't already supply
+    // — see opengraph.rs's doc comment. Gated on `rows_affected() > 0` (a
+    // genuinely fresh row, not a re-seen signature on a crawler restart/
+    // replay) so re-processing already-synced history never re-fetches
+    // OpenGraph data for apps that already have it.
+    if result.rows_affected() > 0 {
+        crate::opengraph::spawn_enrichment(
+            pool.clone(),
+            http.clone(),
+            decoded.app_id.clone(),
+            url,
+            icon_url.is_none(),
+            tagline.is_empty(),
+            description.is_empty(),
+        );
+    }
+
     if let Err(e) = crate::handlers::xp::award(
         pool,
         &submitted_by,
@@ -189,6 +208,37 @@ pub async fn sync_app_from_init(
         log::warn!("failed to award submit_app XP for user {submitted_by}: {e}");
     }
 
+    Ok(())
+}
+
+/// Fills in whichever of icon_url/tagline/description is still missing on
+/// an existing `App` row — never overwrites an already-set field. Shared by
+/// `PATCH /apps/:id/metadata` (src/handlers/apps.rs, a manual/scripted
+/// catch-up path) and the automatic post-creation enrichment
+/// `sync_app_from_init` above triggers (src/opengraph.rs).
+pub async fn apply_metadata_update(
+    pool: &PgPool,
+    app_id: &str,
+    icon_url: Option<&str>,
+    tagline: Option<&str>,
+    description: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE "App" SET
+            "iconUrl" = COALESCE($2, "iconUrl"),
+            tagline = COALESCE(NULLIF($3, ''), tagline),
+            description = COALESCE(NULLIF($4, ''), description),
+            "updatedAt" = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(app_id)
+    .bind(icon_url)
+    .bind(tagline)
+    .bind(description)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

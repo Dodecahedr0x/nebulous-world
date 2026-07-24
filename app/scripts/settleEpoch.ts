@@ -1,14 +1,17 @@
-// Manual settlement run: pulls real AdSense earnings for the trailing period,
+// Settlement run: pulls real AdSense earnings for the trailing period,
 // allocates by traffic share, and funds each app's on-chain reward vaults.
-// Requires ADSENSE_ACCESS_TOKEN (short-lived OAuth token, obtained out-of-band
-// for now) and a funded treasury keypair at TREASURY_KEYPAIR_PATH.
+// Requires ADSENSE_CLIENT_ID/ADSENSE_CLIENT_SECRET/ADSENSE_REFRESH_TOKEN (see
+// src/lib/adsense.ts's getAdsenseAccessToken for how these mint a fresh
+// access token on every run — no manual token minting needed) and a funded
+// treasury keypair at TREASURY_KEYPAIR_PATH. Safe to run unattended (e.g.
+// from a scheduled job) now that token acquisition is automated.
 
 import { readFileSync } from "fs";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { AnchorProvider, Program, Wallet, BN } from "@anchor-lang/core";
 import { getAssociatedTokenAddressSync, getOrCreateAssociatedTokenAccount } from "@solana/spl-token";
 import { searchApps, fetchPlatformTraffic } from "../src/lib/indexerClient";
-import { fetchAdsenseEarnings } from "../src/lib/adsense";
+import { fetchAdsenseEarnings, getAdsenseAccessToken } from "../src/lib/adsense";
 import { allocateByTrafficShare } from "../src/lib/settlement";
 import { config } from "../src/lib/config";
 import { appPda, configPda } from "../src/lib/anchorClient";
@@ -41,8 +44,7 @@ async function main() {
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - 7);
 
-  const accessToken = process.env.ADSENSE_ACCESS_TOKEN;
-  if (!accessToken) throw new Error("ADSENSE_ACCESS_TOKEN is required");
+  const accessToken = await getAdsenseAccessToken();
   const totalEarnings = await fetchAdsenseEarnings({ start, end }, accessToken);
   console.log(`AdSense earnings ${start.toISOString()}–${end.toISOString()}: $${totalEarnings}`);
 

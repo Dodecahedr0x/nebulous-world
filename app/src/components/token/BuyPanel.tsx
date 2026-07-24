@@ -102,7 +102,7 @@ export function BuyPanel() {
           folded in here since it's the same pool this panel already swaps
           against, and there's nothing else on the page that needs it. */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <PoolStatTile label="Price" value={`${pool.price.toFixed(6)} USDC`} />
+        <PoolStatTile label="Price" value={`${pool.price.toFixed(2)} USDC`} />
         <PoolStatTile label={`${TOKEN_SYMBOL} in pool`} value={formatToken(pool.nebReserve, TOKEN_SYMBOL)} />
         <PoolStatTile label="USDC in pool" value={pool.usdcReserve.toFixed(2)} />
       </div>
@@ -153,7 +153,7 @@ export function BuyPanel() {
             disabled={busy || usdcAmount <= 0}
             onClick={handleBuy}
           >
-            {busy ? "Buying…" : `Buy for ${usdcAmount} USDC`}
+            {busy ? "Buying…" : `Buy for ${usdcAmount.toFixed(2)} USDC`}
           </button>
         </>
       )}

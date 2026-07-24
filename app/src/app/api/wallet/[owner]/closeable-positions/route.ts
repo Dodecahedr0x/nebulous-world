@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { handler, ok } from "@/lib/api";
+import { handler, ok, requireRateLimit, RATE_LIMITS } from "@/lib/api";
 import { fetchCloseablePositions } from "@/lib/indexerClient";
 
 export const dynamic = "force-dynamic";
@@ -9,7 +9,8 @@ export const dynamic = "force-dynamic";
 // is public data (a wallet address), so no auth is required, same as the
 // other /api/accounts/** reads.
 export const GET = handler(
-  async (_req: NextRequest, ctx: { params: Promise<{ owner: string }> }) => {
+  async (req: NextRequest, ctx: { params: Promise<{ owner: string }> }) => {
+    await requireRateLimit(req, RATE_LIMITS.read);
     const { owner } = await ctx.params;
     const positions = await fetchCloseablePositions(owner);
     return ok({ positions });

@@ -279,6 +279,9 @@ Local dev environment is ready:
   - database schema applied by the indexer itself, then populated by
     scripts/appData/apps.json's apps landing on-chain (there is no seed
     script — see AGENTS.md) — give the indexer a few seconds to catch up
+  - each app's icon/tagline/description automatically backfilled from its
+    own OpenGraph metadata as the indexer observes it (see
+    indexer/src/opengraph.rs), so cards show real images with no extra step
   - dev keypair's NEB voted/staked across apps and tags at random weights
     (see scripts/seedStakes.ts), so votes/stakes already have activity too
 
@@ -289,6 +292,8 @@ Next steps:
   - Run 'npm run apps:discover -- --tag=<tag>' to use \`claude -p\` to find
     more apps for a given tag and append them to scripts/appData/apps.json,
     then 'npm run apps:create-onchain' to register the new ones
+  - Run 'npm run og:backfill' to manually retry icons/taglines for any apps
+    whose live OpenGraph fetch failed (site was down, timed out, etc.)
   - Run 'npm run seed:stakes' again any time to add more random votes/stakes
   - Run 'npm run teardown:dev' to stop surfpool, the indexer, and local Postgres
 EOF

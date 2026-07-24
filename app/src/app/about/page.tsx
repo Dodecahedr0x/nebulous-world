@@ -123,13 +123,13 @@ export default async function AboutPage() {
           style={{ background: "radial-gradient(circle at 50% 0%, rgba(67, 56, 202, 0.08) 0%, rgba(255, 255, 255, 0) 60%)" }}
         />
         <div className="mx-auto flex max-w-3xl flex-col items-center gap-6 px-4 py-32 text-center sm:px-6 lg:px-8">
-          <span className="rounded-pill border border-hairline bg-mist/60 px-4 py-1.5 text-caption font-semibold uppercase tracking-wide text-slate-steel backdrop-blur-sm">
+          <span className="rounded-pill border border-white/15 bg-white/10 px-4 py-1.5 text-caption font-semibold uppercase tracking-wide text-cream/80 backdrop-blur-sm">
             Crowd-sourced app discovery on Solana
           </span>
-          <h1 className="text-balance font-display text-heading-xl font-normal text-ink sm:text-display sm:leading-[1.05]">
+          <h1 className="text-balance font-display text-heading-xl font-normal text-white sm:text-display sm:leading-[1.05]">
             Discover what the crowd already knows
           </h1>
-          <p className="text-pretty text-subheading text-slate">
+          <p className="text-pretty text-subheading text-cream/70">
             {SITE_NAME} ranks apps by real conviction — token-weighted votes, tag stake, and
             traffic — then shares what they earn with the people who backed them first.
           </p>

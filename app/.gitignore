@@ -43,3 +43,8 @@ yarn-error.log*
 # be committed; scripts/launch-neb/launch-neb.config.example.jsonc is the
 # tracked template.
 /scripts/launch-neb/launch-neb.config.json
+
+# Deploy script config — real values (keypair paths, Render service ids)
+# shouldn't be committed; scripts/deploy/deploy.config.example.jsonc is the
+# tracked template.
+/scripts/deploy/deploy.config.json

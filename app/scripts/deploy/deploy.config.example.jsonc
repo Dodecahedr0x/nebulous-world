@@ -1,0 +1,91 @@
+// Copy this file to deploy.config.json (gitignored) and fill in the blanks
+// before running:
+//
+//   tsx scripts/deploy/index.ts --config=./scripts/deploy/deploy.config.json
+//
+// Leave "dryRun": true until every value below has been reviewed — dry runs
+// print every step's plan (anchor commands, transactions, Render calls)
+// without sending or calling anything for real.
+{
+  "cluster": "devnet",
+  "rpcUrl": "https://api.devnet.solana.com",
+
+  // Path to the keypair that pays for and signs every on-chain step
+  // (program deploy, Config init, NEB launch, app seeding) and becomes the
+  // deployed program's upgrade authority. Needs a real SOL balance on
+  // `cluster` before running with dryRun: false.
+  "deployerKeypairPath": "~/.config/solana/id.json",
+
+  "dryRun": true,
+
+  // Runs `anchor build && anchor deploy` for the program id already
+  // declared in Anchor.toml's [programs.<cluster>] section. Add that
+  // section by hand first if it doesn't exist yet — this script never
+  // writes to Anchor.toml.
+  "program": {
+    "skip": false
+  },
+
+  // One-time `initialize` call on the program's Config PDA — see
+  // scripts/ensureConfigInitialized.ts. No-ops if Config already exists.
+  "config": {
+    "skip": false,
+    "protocolFeeBps": 250
+  },
+
+  // Mints NEB's full supply and seeds a NEB/USDC Meteora DLMM pool — see
+  // scripts/launch-neb/. Set "skip": true and fill in
+  // existingVoteTokenMint/existingDlmmPool below instead to reuse an
+  // already-launched token (e.g. redeploying without relaunching NEB).
+  "launchNeb": {
+    "skip": false,
+    // Mainnet USDC: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+    // Devnet USDC (Circle's faucet mint): 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
+    "quoteMint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    "token": {
+      "name": "Nebula",
+      "symbol": "NEB",
+      "decimals": 6,
+      "totalSupply": 100000000,
+      "uri": "https://example.com/neb-metadata.json",
+      "revokeMintAuthority": true,
+      "isMutable": true
+    },
+    "pool": {
+      "binStep": 100,
+      "feeBps": 100,
+      "initialPrice": 0.0005,
+      "maxPriceMultiplier": 100,
+      "priceRounding": "up",
+      "activationType": "timestamp",
+      "activationPoint": null,
+      "creatorPoolOnOffControl": false
+    }
+  },
+  // "existingVoteTokenMint": "",
+  // "existingDlmmPool": "",
+
+  // Syncs render.yaml's `sync: false` env vars on the nebulous-world and
+  // nebulous-world-indexer services and (optionally) redeploys them.
+  // Requires RENDER_API_KEY in the environment — never put it in this file.
+  // Off by default: find each service's id in the Render dashboard URL
+  // (dashboard.render.com/web/<id> or /pserv/<id>) before enabling.
+  "render": {
+    "skip": true,
+    "webServiceId": "",
+    "indexerServiceId": "",
+    "treasuryAddress": "",
+    "turnstileSiteKey": "",
+    "turnstileSecretKey": "",
+    "triggerDeploy": true
+  },
+
+  // Registers every app in scripts/appData/apps.json on-chain — see
+  // scripts/createAppsOnchain.ts. Idempotent, safe to leave off until the
+  // rest of the deploy is confirmed working.
+  "seedApps": {
+    "skip": true,
+    "file": "scripts/appData/apps.json"
+    // "limit": 20
+  }
+}

@@ -34,6 +34,18 @@ struct AppGraphEdge {
 
 const MAX_NEIGHBORS_PER_APP: usize = 6;
 
+/// How far back every platform-wide trend chart looks — apps/tags/votes/
+/// stake (api.rs's get_platform_metrics_history), page views, and revenue
+/// (both below) all share this window so they render on the same x-axis
+/// domain instead of each defaulting to "however much history its own
+/// source table happens to have". Before this, `platform_metrics_snapshot`
+/// (a brand-new hourly gauge table) and `AppStatsSnapshot`/
+/// `indexed_instruction` (long-lived daily tables) produced wildly
+/// different date ranges on charts that are supposed to sit side by side.
+/// Matches `TRENDING_MONTH_DAYS` in handlers/apps.rs — same "trending
+/// month" concept, applied platform-wide instead of per-app.
+pub const PLATFORM_TREND_WINDOW_DAYS: i64 = 30;
+
 struct AppNode {
     slug: String,
     name: String,
@@ -120,13 +132,82 @@ fn top_neighbor_keys(edges: &[AppGraphEdge], weight_of: impl Fn(&AppGraphEdge) -
     keep
 }
 
+/// The maps' "advanced search" — min/max app stake, min/max tag count,
+/// min/max pageviews. Same param names and semantics as `apps::SearchInput`
+/// (which the Discover list's `FilterPanel` already exposes; see
+/// `apps::in_range`, reused here), just applied over the graph/pack app
+/// subsets instead of the full paginated search.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RangeQuery {
+    #[serde(default)]
+    app_stake_min: Option<f64>,
+    #[serde(default)]
+    app_stake_max: Option<f64>,
+    #[serde(default)]
+    tags_count_min: Option<i64>,
+    #[serde(default)]
+    tags_count_max: Option<i64>,
+    #[serde(default)]
+    pageviews_min: Option<f64>,
+    #[serde(default)]
+    pageviews_max: Option<f64>,
+}
+
+impl RangeQuery {
+    fn matches(&self, stake: f64, view_count: i32, tag_count: i64) -> bool {
+        crate::handlers::apps::in_range(stake, self.app_stake_min, self.app_stake_max)
+            && crate::handlers::apps::in_range(view_count as f64, self.pageviews_min, self.pageviews_max)
+            && crate::handlers::apps::in_range(
+                tag_count as f64,
+                self.tags_count_min.map(|v| v as f64),
+                self.tags_count_max.map(|v| v as f64),
+            )
+    }
+}
+
+// `RangeQuery`'s fields are repeated here rather than `#[serde(flatten)]`ed
+// in — axum's query-string extractor (serde_urlencoded under the hood)
+// doesn't support flatten: every field query-deserializes fine standalone,
+// but flattening it into a sibling struct makes deserialization fail with
+// "invalid type: string ..., expected f64" for every request that includes
+// even one range param (i.e. every "Advanced search" filter on the Apps
+// map tab, unlike Group's tag_pack below, which takes `RangeQuery` directly
+// and was never flattened, hence never demonstrated bug).
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GraphQuery {
     #[serde(default)]
     tags: Option<String>,
+    #[serde(default)]
+    app_stake_min: Option<f64>,
+    #[serde(default)]
+    app_stake_max: Option<f64>,
+    #[serde(default)]
+    tags_count_min: Option<i64>,
+    #[serde(default)]
+    tags_count_max: Option<i64>,
+    #[serde(default)]
+    pageviews_min: Option<f64>,
+    #[serde(default)]
+    pageviews_max: Option<f64>,
+}
+
+impl GraphQuery {
+    fn ranges(&self) -> RangeQuery {
+        RangeQuery {
+            app_stake_min: self.app_stake_min,
+            app_stake_max: self.app_stake_max,
+            tags_count_min: self.tags_count_min,
+            tags_count_max: self.tags_count_max,
+            pageviews_min: self.pageviews_min,
+            pageviews_max: self.pageviews_max,
+        }
+    }
 }
 
 async fn app_graph(State(state): State<Arc<ApiState>>, Query(q): Query<GraphQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+    let ranges = q.ranges();
     let tag_slugs: Vec<String> = q.tags.map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect()).unwrap_or_default();
 
     let rows: Vec<(String, String, f64, i32, f64)> = sqlx::query_as(
@@ -157,6 +238,10 @@ async fn app_graph(State(state): State<Arc<ApiState>>, Query(q): Query<GraphQuer
             if !tag_slugs.iter().all(|s| slugs.contains(s.as_str())) {
                 continue;
             }
+        }
+
+        if !ranges.matches(stake_total, view_count, tag_rows.len() as i64) {
+            continue;
         }
 
         apps.push(AppNode {
@@ -273,7 +358,29 @@ struct TagPackAppDto {
 /// circles = next-most-common" by sorting each app's own tags into that
 /// same global order (see app/src/lib/tagPack.ts's `buildTagPackTree`).
 /// Same join as `tag_graph`, grouped by app instead of collapsed into edges.
-async fn tag_pack(State(state): State<Arc<ApiState>>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn tag_pack(State(state): State<Arc<ApiState>>, Query(ranges): Query<RangeQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+    // Which apps pass the range filters, decided up front — tag count needs
+    // each app's full tag list, not available from the "App" table alone,
+    // and deciding this first (rather than filtering the accumulated `apps`
+    // map afterward) keeps `tag_stats`'s per-tag app-count/stake aggregates
+    // consistent with the apps actually returned below.
+    let app_rows: Vec<(String, f64, i32, i64)> = sqlx::query_as(
+        r#"
+        SELECT a.slug, a."stakeTotal", a."viewCount",
+               (SELECT COUNT(*) FROM "AppTag" at WHERE at."appId" = a.id)
+        FROM "App" a
+        WHERE a.status = 'approved'
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(crate::api::internal)?;
+    let passing: HashSet<String> = app_rows
+        .into_iter()
+        .filter(|(_, stake, views, tag_count)| ranges.matches(*stake, *views, *tag_count))
+        .map(|(slug, ..)| slug)
+        .collect();
+
     let rows: Vec<(String, String, f64, String, String, f64)> = sqlx::query_as(
         r#"
         SELECT a.slug, a.name, a."stakeTotal", t.slug, t.name, at."stakeTotal"
@@ -290,6 +397,10 @@ async fn tag_pack(State(state): State<Arc<ApiState>>) -> Result<Json<serde_json:
     let mut tag_stats: HashMap<String, (String, i64, f64)> = HashMap::new(); // tagSlug -> (name, appCount, stake)
     let mut apps: HashMap<String, (String, f64, Vec<String>)> = HashMap::new(); // appSlug -> (name, stake, tagSlugs)
     for (app_slug, app_name, app_stake, tag_slug, tag_name, tag_stake) in rows {
+        if !passing.contains(&app_slug) {
+            continue;
+        }
+
         let tag_entry = tag_stats.entry(tag_slug.clone()).or_insert((tag_name, 0, 0.0));
         tag_entry.1 += 1;
         tag_entry.2 += tag_stake;
@@ -313,6 +424,9 @@ async fn tag_pack(State(state): State<Arc<ApiState>>) -> Result<Json<serde_json:
     .await
     .map_err(crate::api::internal)?;
     for (slug, name, stake) in untagged_rows {
+        if !passing.contains(&slug) {
+            continue;
+        }
         apps.entry(slug).or_insert((name, stake, Vec::new()));
     }
 
@@ -398,11 +512,12 @@ async fn platform_views_trend(State(state): State<Arc<ApiState>>) -> Result<Json
         r#"
         SELECT s.date, SUM(s."viewCount")
         FROM "AppStatsSnapshot" s JOIN "App" a ON a.id = s."appId"
-        WHERE a.status = 'approved'
+        WHERE a.status = 'approved' AND s.date > now() - make_interval(days => $1)
         GROUP BY s.date
         ORDER BY s.date ASC
         "#,
     )
+    .bind(PLATFORM_TREND_WINDOW_DAYS as i32)
     .fetch_all(&state.pool)
     .await
     .map_err(crate::api::internal)?;
@@ -444,10 +559,12 @@ async fn platform_revenue_trend(
                SUM((data->'data'->>'amount')::numeric)::text
         FROM indexed_instruction
         WHERE instruction_name = 'fund_app_rewards' AND block_time IS NOT NULL
+          AND block_time > now() - make_interval(days => $1)
         GROUP BY day
         ORDER BY day ASC
         "#,
     )
+    .bind(PLATFORM_TREND_WINDOW_DAYS as i32)
     .fetch_all(&state.pool)
     .await
     .map_err(crate::api::internal)?;

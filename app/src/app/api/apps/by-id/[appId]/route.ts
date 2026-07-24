@@ -14,6 +14,6 @@ export const GET = handler(
     const { appId } = await ctx.params;
     const app = await fetchAppById(appId);
     if (!app) throw new ApiError("Not indexed yet", 404);
-    return ok({ app });
+    return ok(app);
   },
 );

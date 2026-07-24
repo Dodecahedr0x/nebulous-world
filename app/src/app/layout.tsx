@@ -6,6 +6,7 @@ import { AuthProvider } from "@/components/providers/AuthProvider";
 import { AppShell } from "@/components/AppShell";
 import { Toaster } from "@/components/ui/Toaster";
 import { JsonLd } from "@/components/JsonLd";
+import { AdSenseScript } from "@/components/ads/AdSenseScript";
 import { SITE_NAME, SITE_DESCRIPTION, SITE_URL } from "@/lib/constants";
 
 const title = `${SITE_NAME} — discover the best apps, ranked by the crowd`;
@@ -79,6 +80,7 @@ export default function RootLayout({
   return (
     <html lang="en" className={bodySans.variable}>
       <body className="bg-cream font-sans text-ink antialiased">
+        <AdSenseScript />
         <JsonLd data={siteLd} />
         <JsonLd data={orgLd} />
         <SolanaProvider>

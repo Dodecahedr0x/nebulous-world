@@ -20,20 +20,35 @@ export interface TrendPoint {
 // points — a flat baseline at 0 reads as "nothing here yet" on its own,
 // no caption needed, and every card keeps the same layout.
 const MIN_POINTS = 7;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const TICK_STYLE = { fontSize: 9, fill: "#565a66" };
 
+// Real, evenly-day-spaced dates ending today rather than plain index
+// strings ("0".."6") — the x-axis is a genuine time scale (see below), so
+// every point on it needs a real, parseable date to plot correctly.
 function withZeroFloor(data: TrendPoint[]): TrendPoint[] {
   if (data.length >= 2) return data;
-  return Array.from({ length: MIN_POINTS }, (_, i) => ({ x: String(i), y: 0 }));
+  const now = Date.now();
+  return Array.from({ length: MIN_POINTS }, (_, i) => ({
+    x: new Date(now - (MIN_POINTS - 1 - i) * ONE_DAY_MS).toISOString(),
+    y: 0,
+  }));
 }
 
-// Compact "Jan 5" tick/tooltip date. `x` is normally an ISO date string;
-// withZeroFloor's fallback points use plain index strings ("0".."6")
-// instead (there's no real date for a series with no history yet), which
-// Date can't parse — those render as-is rather than as "Invalid Date".
-function formatTickDate(x: string): string {
+// x is plotted on a numeric time scale (epoch ms — see the XAxis below),
+// not laid out one-point-per-array-index: two points a week apart sit
+// visibly farther apart than two points an hour apart, instead of both
+// getting the same fixed-width slot regardless of the actual gap between
+// them.
+function toChartPoints(data: TrendPoint[]): { x: number; y: number }[] {
+  return withZeroFloor(data).map((p) => ({ x: new Date(p.x).getTime(), y: p.y }));
+}
+
+// Compact "Jan 5" tick/tooltip date, from either an ISO string or the
+// epoch-ms number recharts hands tickFormatter/the tooltip's `label`.
+function formatTickDate(x: string | number): string {
   const d = new Date(x);
-  return Number.isNaN(d.getTime()) ? x : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return Number.isNaN(d.getTime()) ? String(x) : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 // Deliberately still a dark-glass popover (unlike ForceMap/GroupMap's hover
@@ -48,7 +63,7 @@ function ChartTooltip({
 }: {
   active?: boolean;
   payload?: { value: number }[];
-  label?: string;
+  label?: string | number;
   valueFormat: (n: number) => string;
 }) {
   if (!active || !payload?.length) return null;
@@ -83,7 +98,7 @@ export function MetricTrendCard({
   valueKind?: "number" | "token";
 }) {
   const gradientId = useId();
-  const chartData = withZeroFloor(data);
+  const chartData = toChartPoints(data);
   const valueFormat = valueKind === "token" ? (n: number) => formatToken(n, TOKEN_SYMBOL) : formatNumber;
   // Split "1.23M NEB" -> ["1.23M", "NEB"] so the unit renders smaller and
   // muted next to the bolded figure, matching the reference's "123 Mil"
@@ -92,7 +107,7 @@ export function MetricTrendCard({
   const [amount, unit] = splitValueUnit(value);
 
   return (
-    <div className="card flex flex-col">
+    <div className="card flex flex-col justify-between">
       <div className="min-w-0 p-6 pb-0">
         <div className="text-caption font-semibold uppercase tracking-wide text-slate">
           {label}
@@ -130,6 +145,9 @@ export function MetricTrendCard({
             </defs>
             <XAxis
               dataKey="x"
+              type="number"
+              scale="time"
+              domain={["dataMin", "dataMax"]}
               tickFormatter={formatTickDate}
               tick={TICK_STYLE}
               axisLine={false}

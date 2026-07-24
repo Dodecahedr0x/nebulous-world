@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { handler, ok } from "@/lib/api";
+import { handler, ok, requireRateLimit, RATE_LIMITS } from "@/lib/api";
 import { fetchBalance } from "@/lib/indexerClient";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +8,8 @@ export const dynamic = "force-dynamic";
 // mint, proxied from the indexer instead of a direct
 // `connection.getTokenAccountBalance()` call.
 export const GET = handler(
-  async (_req: NextRequest, ctx: { params: Promise<{ owner: string; mint: string }> }) => {
+  async (req: NextRequest, ctx: { params: Promise<{ owner: string; mint: string }> }) => {
+    await requireRateLimit(req, RATE_LIMITS.read);
     const { owner, mint } = await ctx.params;
     const balance = await fetchBalance(owner, mint);
     return ok(balance);

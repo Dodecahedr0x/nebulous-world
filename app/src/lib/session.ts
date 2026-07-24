@@ -1,15 +1,16 @@
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHmac, timingSafeEqual, randomBytes } from "crypto";
 import { cookies } from "next/headers";
 import { config } from "./config";
 
-// Lightweight stateless session handling.
+// Lightweight stateless session + auth-challenge handling.
 //
-// We avoid a session table by signing small payloads with HMAC-SHA256 using
-// the server tracking secret — the session cookie is self-describing and
-// tamper-evident.
+// We avoid a session table by signing small payloads with HMAC-SHA256 using the
+// server tracking secret. Both the auth challenge (nonce) and the resulting
+// session cookie are self-describing and tamper-evident.
 
 const SESSION_COOKIE = "nebulous_world_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const CHALLENGE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 function sign(payload: string): string {
   return createHmac("sha256", config.tracking.secret)
@@ -22,6 +23,26 @@ function safeEqual(a: string, b: string): boolean {
   const bb = Buffer.from(b);
   if (ab.length !== bb.length) return false;
   return timingSafeEqual(ab, bb);
+}
+
+// --- Auth challenge (stateless nonce) ---
+
+/** Create a signed nonce that encodes its own issue time. */
+export function createNonce(): string {
+  const raw = `${Date.now()}.${randomBytes(16).toString("hex")}`;
+  return `${raw}.${sign(raw)}`;
+}
+
+/** Verify a nonce is well-formed, correctly signed and not expired. */
+export function verifyNonce(nonce: string): boolean {
+  const parts = nonce.split(".");
+  if (parts.length !== 3) return false;
+  const [ts, rand, mac] = parts;
+  const raw = `${ts}.${rand}`;
+  if (!safeEqual(mac!, sign(raw))) return false;
+  const issued = Number(ts);
+  if (!Number.isFinite(issued)) return false;
+  return Date.now() - issued <= CHALLENGE_TTL_MS;
 }
 
 // --- Session token ---

@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
+import bs58 from "bs58";
 
 export interface AuthUser {
   id: string;
@@ -20,8 +21,9 @@ export interface AuthUser {
 interface AuthState {
   user: AuthUser | null;
   loading: boolean;
-  connectingSession: boolean;
+  signingIn: boolean;
   error: string | null;
+  signIn: () => Promise<boolean>;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -29,18 +31,18 @@ interface AuthState {
 const AuthContext = createContext<AuthState | null>(null);
 
 /**
- * A connected wallet is enough to be "signed in" — there's no separate
- * message-signing step. Real authorization for anything that spends value
- * (votes, stakes, buys) comes from the wallet's own signature on that
- * transaction; this session cookie is just bookkeeping (display name, DB FK
- * for submissions), so it's established automatically the moment a wallet
- * connects.
+ * Handles Sign-In-With-Solana: fetch a nonce, ask the connected wallet to sign
+ * the challenge message, and exchange the signature for a session cookie.
+ * This is deliberate friction over auto-connecting a session the moment a
+ * wallet connects — the signature is what lets the session (and the rate
+ * limiter in lib/api.ts's requireRateLimit) actually identify a unique
+ * wallet, rather than trusting whatever address a client claims for free.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const { publicKey, connected, disconnect } = useWallet();
+  const { publicKey, signMessage, connected, disconnect } = useWallet();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
-  const [connectingSession, setConnectingSession] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -59,40 +61,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refresh();
   }, [refresh]);
 
-  // As soon as a wallet is connected (and isn't already the signed-in
-  // wallet), start a session for it — no signature required.
-  useEffect(() => {
-    if (!connected || !publicKey) return;
-    const wallet = publicKey.toBase58();
-    if (user?.wallet === wallet) return;
-
-    let cancelled = false;
+  const signIn = useCallback(async (): Promise<boolean> => {
     setError(null);
-    setConnectingSession(true);
-    fetch("/api/auth/connect", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ wallet }),
-    })
-      .then((res) => res.json())
-      .then((json) => {
-        if (cancelled) return;
-        if (!json.ok) throw new Error(json.error || "Could not connect");
-        setUser(json.data.user);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Could not connect");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setConnectingSession(false);
+    if (!publicKey || !signMessage) {
+      setError("Connect a wallet that supports message signing first.");
+      return false;
+    }
+    setSigningIn(true);
+    try {
+      const wallet = publicKey.toBase58();
+      // 1. Get a challenge.
+      const challengeRes = await fetch("/api/auth/challenge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wallet }),
       });
+      const challenge = await challengeRes.json();
+      if (!challenge.ok) throw new Error(challenge.error || "Challenge failed");
+      const { message, nonce } = challenge.data;
 
-    return () => {
-      cancelled = true;
-    };
-  }, [connected, publicKey, user?.wallet]);
+      // 2. Sign it with the wallet.
+      const signature = await signMessage(new TextEncoder().encode(message));
+      const signatureB58 = bs58.encode(signature);
+
+      // 3. Verify + create session.
+      const verifyRes = await fetch("/api/auth/verify", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wallet, signature: signatureB58, nonce, message }),
+      });
+      const verify = await verifyRes.json();
+      if (!verify.ok) throw new Error(verify.error || "Verification failed");
+      setUser(verify.data.user);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sign-in failed");
+      return false;
+    } finally {
+      setSigningIn(false);
+    }
+  }, [publicKey, signMessage]);
 
   const signOut = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -114,8 +122,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [connected]);
 
   const value = useMemo<AuthState>(
-    () => ({ user, loading, connectingSession, error, signOut, refresh }),
-    [user, loading, connectingSession, error, signOut, refresh],
+    () => ({ user, loading, signingIn, error, signIn, signOut, refresh }),
+    [user, loading, signingIn, error, signIn, signOut, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -329,14 +329,62 @@ export async function fetchRelatedApps(query: { slugs?: string[]; tagSlugs?: str
   return (await get(`/apps/related?${sp.toString()}`)) as { apps: AppDTO[] };
 }
 
+/**
+ * The maps' "advanced search" — min/max app stake, min/max tag count,
+ * min/max pageviews. Each value is a raw query-param string (or omitted),
+ * same convention as Discover's `RangeFilters` (`components/discover/
+ * FilterPanel.tsx`) — kept as its own smaller type here rather than
+ * importing that one, since this lib module shouldn't depend on a
+ * component file, and the maps only expose 3 of Discover's 4 range pairs
+ * (no "tags stake").
+ */
+export interface MapRangeFilters {
+  appStakeMin?: string;
+  appStakeMax?: string;
+  tagsCountMin?: string;
+  tagsCountMax?: string;
+  pageviewsMin?: string;
+  pageviewsMax?: string;
+}
+
+const MAP_RANGE_KEYS: (keyof MapRangeFilters)[] = [
+  "appStakeMin",
+  "appStakeMax",
+  "tagsCountMin",
+  "tagsCountMax",
+  "pageviewsMin",
+  "pageviewsMax",
+];
+
+/** Pulls the maps' range-filter params out of an incoming request's own search params — shared by /api/apps/graph and /api/tags/pack. */
+export function mapRangeFiltersFromParams(sp: URLSearchParams): MapRangeFilters {
+  const ranges: MapRangeFilters = {};
+  for (const key of MAP_RANGE_KEYS) {
+    const value = sp.get(key);
+    if (value) ranges[key] = value;
+  }
+  return ranges;
+}
+
+function rangeSearchParams(ranges?: MapRangeFilters): URLSearchParams {
+  const sp = new URLSearchParams();
+  if (!ranges) return sp;
+  for (const [key, value] of Object.entries(ranges)) {
+    if (value) sp.set(key, value);
+  }
+  return sp;
+}
+
 export interface AppGraph {
   nodes: { id: string; name: string; stake: number; views: number; votes: number }[];
   edges: { source: string; target: string; shared: number; weighted: number }[];
 }
 
-export async function fetchAppGraph(tags: string[] = []): Promise<AppGraph> {
-  const sp = tags.length > 0 ? `?tags=${encodeURIComponent(tags.join(","))}` : "";
-  return (await get(`/apps/graph${sp}`)) as AppGraph;
+export async function fetchAppGraph(tags: string[] = [], ranges?: MapRangeFilters): Promise<AppGraph> {
+  const sp = rangeSearchParams(ranges);
+  if (tags.length > 0) sp.set("tags", tags.join(","));
+  const qs = sp.toString();
+  return (await get(`/apps/graph${qs ? `?${qs}` : ""}`)) as AppGraph;
 }
 
 export interface TagGraph {
@@ -354,8 +402,9 @@ export interface TagPack {
 }
 
 /** Every approved app's full tag list, for the Explore page's Group (circle-packing) tab — see app/src/lib/tagPack.ts. */
-export async function fetchTagPack(): Promise<TagPack> {
-  return (await get("/tags/pack")) as TagPack;
+export async function fetchTagPack(ranges?: MapRangeFilters): Promise<TagPack> {
+  const qs = rangeSearchParams(ranges).toString();
+  return (await get(`/tags/pack${qs ? `?${qs}` : ""}`)) as TagPack;
 }
 
 export interface TagListEntry {
@@ -418,15 +467,17 @@ export async function createVote(input: {
   };
 }
 
-export async function withdrawVote(
-  voteId: string,
+export async function withdrawVote(voteId: string, userId: string): Promise<{ withdrawn: boolean }> {
+  return (await post(`/votes/${encodeURIComponent(voteId)}/withdraw`, { userId })) as { withdrawn: boolean };
+}
+
+/** Withdraws `amount` off this (user, app)'s active Vote rows, oldest-first — see indexer/src/handlers/votes.rs's withdraw_partial. */
+export async function withdrawPartialVotes(
+  appId: string,
+  amount: number,
   userId: string,
-  amount?: number,
-): Promise<{ withdrawn: boolean; fullWithdrawal: boolean }> {
-  return (await post(`/votes/${encodeURIComponent(voteId)}/withdraw`, { userId, amount })) as {
-    withdrawn: boolean;
-    fullWithdrawal: boolean;
-  };
+): Promise<{ withdrawn: boolean }> {
+  return (await post("/votes/withdraw-partial", { appId, amount, userId })) as { withdrawn: boolean };
 }
 
 export async function fetchStakes(appId: string, userId: string): Promise<{ id: string; amount: number; appTagId: string }[]> {
@@ -465,24 +516,27 @@ export async function fetchMyPositions(userId: string): Promise<MyPosition[]> {
   return positions;
 }
 
-export async function withdrawStake(
-  stakeId: string,
+export async function withdrawStake(stakeId: string, userId: string): Promise<{ withdrawn: boolean }> {
+  return (await post(`/stakes/${encodeURIComponent(stakeId)}/withdraw`, { userId })) as { withdrawn: boolean };
+}
+
+/** Withdraws `amount` off this (user, app-tag)'s active Stake rows, oldest-first — see indexer/src/handlers/stakes.rs's withdraw_partial. */
+export async function withdrawPartialStakes(
+  appTagId: string,
+  amount: number,
   userId: string,
-  amount?: number,
-): Promise<{ withdrawn: boolean; fullWithdrawal: boolean }> {
-  return (await post(`/stakes/${encodeURIComponent(stakeId)}/withdraw`, { userId, amount })) as {
-    withdrawn: boolean;
-    fullWithdrawal: boolean;
-  };
+): Promise<{ withdrawn: boolean }> {
+  return (await post("/stakes/withdraw-partial", { appTagId, amount, userId })) as { withdrawn: boolean };
 }
 
 export interface RewardsPositions {
-  votes: { appId: string; appSlug: string; appName: string; amount: number }[];
+  votes: { appId: string; appSlug: string; appName: string; appIconUrl: string | null; amount: number }[];
   stakes: {
     appTagId: string;
     appId: string;
     appSlug: string;
     appName: string;
+    appIconUrl: string | null;
     tagSlug: string;
     tagName: string;
     amount: number;

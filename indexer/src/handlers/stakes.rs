@@ -113,12 +113,6 @@ async fn create(State(state): State<Arc<ApiState>>, Json(req): Json<CreateReq>) 
 #[serde(rename_all = "camelCase")]
 struct WithdrawReq {
     user_id: String,
-    /// Withdraw only part of the stake, mirroring `withdraw_tag_stake`'s
-    /// on-chain `amount` parameter (which reduces `StakePosition.amount`
-    /// rather than closing it — see that instruction's handler). Omitted or
-    /// `>=` the stake's current amount withdraws the whole thing, same as
-    /// before this field existed.
-    amount: Option<f64>,
 }
 
 async fn withdraw(
@@ -126,13 +120,13 @@ async fn withdraw(
     Path(stake_id): Path<String>,
     Json(req): Json<WithdrawReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let row: Option<(String, String, bool, f64)> =
-        sqlx::query_as(r#"SELECT id, "userId", active, amount FROM "Stake" WHERE id = $1"#)
+    let row: Option<(String, String, bool)> =
+        sqlx::query_as(r#"SELECT id, "userId", active FROM "Stake" WHERE id = $1"#)
             .bind(&stake_id)
             .fetch_optional(&state.pool)
             .await
             .map_err(crate::api::internal)?;
-    let Some((_, user_id, active, current_amount)) = row else {
+    let Some((_, user_id, active)) = row else {
         return Err(not_found("Stake not found"));
     };
     if user_id != req.user_id {
@@ -141,35 +135,14 @@ async fn withdraw(
     if !active {
         return Err(crate::api::conflict("Stake already withdrawn"));
     }
-    if let Some(amount) = req.amount {
-        if amount <= 0.0 {
-            return Err(crate::api::bad_request("Amount must be positive".to_string()));
-        }
-        if amount > current_amount {
-            return Err(crate::api::bad_request("Amount exceeds staked balance".to_string()));
-        }
-    }
 
-    let full_withdrawal = req.amount.is_none_or(|amount| amount >= current_amount);
-
-    let app_tag_id: String = if full_withdrawal {
-        sqlx::query_scalar(
-            r#"UPDATE "Stake" SET active = false, "withdrawnAt" = now() WHERE id = $1 RETURNING "appTagId""#,
-        )
-        .bind(&stake_id)
-        .fetch_one(&state.pool)
-        .await
-        .map_err(crate::api::internal)?
-    } else {
-        sqlx::query_scalar(
-            r#"UPDATE "Stake" SET amount = amount - $2 WHERE id = $1 RETURNING "appTagId""#,
-        )
-        .bind(&stake_id)
-        .bind(req.amount.unwrap())
-        .fetch_one(&state.pool)
-        .await
-        .map_err(crate::api::internal)?
-    };
+    let app_tag_id: String = sqlx::query_scalar(
+        r#"UPDATE "Stake" SET active = false, "withdrawnAt" = now() WHERE id = $1 RETURNING "appTagId""#,
+    )
+    .bind(&stake_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(crate::api::internal)?;
 
     let app_id: String = sqlx::query_scalar(r#"SELECT "appId" FROM "AppTag" WHERE id = $1"#)
         .bind(&app_tag_id)
@@ -180,11 +153,91 @@ async fn withdraw(
     refresh_app_tag(&state.pool, &app_tag_id).await?;
     refresh_app(&state.pool, &app_id).await?;
 
-    Ok(Json(serde_json::json!({ "withdrawn": true, "fullWithdrawal": full_withdrawal })))
+    Ok(Json(serde_json::json!({ "withdrawn": true })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WithdrawPartialReq {
+    app_tag_id: String,
+    user_id: String,
+    amount: f64,
+}
+
+/// Withdraws `amount` (up to the full active total) off this (user, app-tag)'s
+/// possibly-several active `Stake` rows — a user can stake on the same tag
+/// more than once over time (each `stake_tag()` call just adds to the single
+/// on-chain StakePosition), so this consumes rows oldest-first, fully
+/// deactivating each until `amount` is covered and partially reducing the
+/// last one it touches. Subsumes what a former `withdraw_all` did (the
+/// special case of `amount` == the full total). Used by the profile page's
+/// "Your stakes" list, which sums exactly these rows (see
+/// handlers/rewards.rs) — the on-chain withdraw call there always withdraws
+/// this same `amount`.
+async fn withdraw_partial(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<WithdrawPartialReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if req.amount <= 0.0 {
+        return Err(crate::api::bad_request("amount must be positive"));
+    }
+
+    let app_id: Option<String> = sqlx::query_scalar(r#"SELECT "appId" FROM "AppTag" WHERE id = $1"#)
+        .bind(&req.app_tag_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(crate::api::internal)?;
+    let Some(app_id) = app_id else {
+        return Err(not_found("Tag not found"));
+    };
+
+    let rows: Vec<(String, f64)> = sqlx::query_as(
+        r#"SELECT id, amount FROM "Stake" WHERE "userId" = $1 AND "appTagId" = $2 AND active = true ORDER BY "createdAt" ASC"#,
+    )
+    .bind(&req.user_id)
+    .bind(&req.app_tag_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(crate::api::internal)?;
+
+    // See votes.rs's withdraw_partial for why this tolerance is safe.
+    const EPS: f64 = 1e-9;
+    let mut remaining = req.amount;
+    for (id, row_amount) in rows {
+        if remaining <= EPS {
+            break;
+        }
+        if row_amount <= remaining + EPS {
+            sqlx::query(r#"UPDATE "Stake" SET active = false, "withdrawnAt" = now() WHERE id = $1"#)
+                .bind(&id)
+                .execute(&state.pool)
+                .await
+                .map_err(crate::api::internal)?;
+            remaining -= row_amount;
+        } else {
+            sqlx::query(r#"UPDATE "Stake" SET amount = amount - $2 WHERE id = $1"#)
+                .bind(&id)
+                .bind(remaining)
+                .execute(&state.pool)
+                .await
+                .map_err(crate::api::internal)?;
+            remaining = 0.0;
+        }
+    }
+
+    if remaining > EPS {
+        return Err(crate::api::bad_request("amount exceeds your active stake on this tag"));
+    }
+
+    refresh_app_tag(&state.pool, &req.app_tag_id).await?;
+    refresh_app(&state.pool, &app_id).await?;
+
+    Ok(Json(serde_json::json!({ "withdrawn": true })))
 }
 
 pub fn routes() -> Router<Arc<ApiState>> {
     Router::new()
         .route("/stakes", get(list).post(create))
         .route("/stakes/:id/withdraw", post(withdraw))
+        .route("/stakes/withdraw-partial", post(withdraw_partial))
 }

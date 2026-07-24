@@ -5,6 +5,7 @@ mod crawler;
 mod db;
 mod dlmm_bridge;
 mod handlers;
+mod opengraph;
 mod platform_metrics;
 mod processors;
 mod reconcile;
@@ -66,12 +67,19 @@ async fn main() -> Result<()> {
         log::warn!("xp backfill failed: {e}");
     }
 
+    // Shared across the crawler's automatic OpenGraph enrichment
+    // (src/opengraph.rs) and ApiState below — reqwest::Client pools
+    // connections internally, so one instance for the whole process is the
+    // idiomatic choice, not a new client per outbound request.
+    let http_client = reqwest::Client::new();
+
     tokio::spawn(rollup::run(pool.clone(), config.rollup_interval_secs));
     tokio::spawn(crawler::run(
         config.rpc_http_url.clone(),
         config.program_id,
         pool.clone(),
         config.crawler_poll_interval_secs,
+        http_client.clone(),
     ));
     tokio::spawn(platform_metrics::run(
         pool.clone(),
@@ -90,7 +98,7 @@ async fn main() -> Result<()> {
     let api_state = Arc::new(api::ApiState {
         pool: pool.clone(),
         rpc: solana_client::nonblocking::rpc_client::RpcClient::new(config.rpc_http_url.clone()),
-        http: reqwest::Client::new(),
+        http: http_client,
         program_id: config.program_id,
         vote_token_mint: config.vote_token_mint.unwrap_or_default(),
         admin_authority,

@@ -41,16 +41,16 @@ interface ClaimRow {
   appName: string;
   tagSlug?: string;
   tagName?: string;
-  stakedAmount: number;
   pending: number | null; // null while loading or unavailable
 }
 
 /**
- * "Your rewards" — lists every app (and app-tag) the signed-in user has an
- * active vote or stake on, with the pending NEB reward for each and a claim
- * button. Pending amounts only exist on-chain (the DB tracks stake amounts
- * for ranking, never the reward accumulator/checkpoint — see lib/rewards.ts),
- * so this requires a connected wallet and a real (non-simulation) deployment.
+ * "Your rewards" — every app/tag whose vote or tag stake has actually
+ * accrued a claimable NEB reward right now, nothing else. This used to also
+ * be the full stake-management surface (search, bulk select, unstake) —
+ * that workspace moved to the Profile page's "Your stakes" list (see
+ * components/profile/MyStakes.tsx); this stays a short, simple claim list
+ * so the Rewards page doesn't repeat it.
  */
 export function ClaimRewards() {
   const { user } = useAuth();
@@ -63,7 +63,7 @@ export function ClaimRewards() {
   const [claimingAll, setClaimingAll] = useState(false);
 
   useEffect(() => {
-    if (!user) {
+    if (!user || isSimulationMode() || !wallet.publicKey) {
       setRows(null);
       return;
     }
@@ -77,6 +77,7 @@ export function ClaimRewards() {
 
       const votes: VotePositionDTO[] = json.data.votes;
       const stakes: StakePositionDTO[] = json.data.stakes;
+      const owner = wallet.publicKey!.toBase58();
 
       const base: ClaimRow[] = [
         ...votes.map((v) => ({
@@ -85,7 +86,6 @@ export function ClaimRewards() {
           appId: v.appId,
           appSlug: v.appSlug,
           appName: v.appName,
-          stakedAmount: v.amount,
           pending: null,
         })),
         ...stakes.map((s) => ({
@@ -96,15 +96,9 @@ export function ClaimRewards() {
           appName: s.appName,
           tagSlug: s.tagSlug,
           tagName: s.tagName,
-          stakedAmount: s.amount,
           pending: null,
         })),
       ];
-      setRows(base);
-
-      if (isSimulationMode() || !wallet.publicKey) return;
-
-      const owner = wallet.publicKey.toBase58();
 
       const withPending = await Promise.all(
         base.map(async (row) => {
@@ -136,14 +130,14 @@ export function ClaimRewards() {
             );
             return { ...row, pending: fromRawAmount(pending) };
           } catch {
-            // Position/app not found on-chain yet (e.g. simulation-mode data
-            // with no matching real account) — leave pending unknown rather
-            // than erroring the whole list.
+            // Position/app not found on-chain yet — leave pending unknown
+            // rather than erroring the whole list; it's filtered out below
+            // either way (only a known-positive pending shows up).
             return row;
           }
         }),
       );
-      if (!cancelled) setRows(withPending);
+      if (!cancelled) setRows(withPending.filter((r) => r.pending != null && r.pending > 0));
     }
 
     load().catch(() => setRows([]));
@@ -167,9 +161,7 @@ export function ClaimRewards() {
           : `Claimed your ${row.appName} reward`,
         txSig ? { txSig } : undefined,
       );
-      setRows((prev) =>
-        prev?.map((r) => (r.key === row.key ? { ...r, pending: 0 } : r)) ?? null,
-      );
+      setRows((prev) => prev?.filter((r) => r.key !== row.key) ?? null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Claim failed");
     } finally {
@@ -209,12 +201,14 @@ export function ClaimRewards() {
   return (
     <section className="card space-y-4 p-6">
       <div>
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate">
-          Your rewards
-        </h2>
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate">Your rewards</h2>
         <p className="mt-1 text-xs text-slate-steel">
           Every vote and tag stake earns a share of that app&apos;s funded {TOKEN_SYMBOL} reward
-          pool, on top of your principal — claim anytime without withdrawing your stake.
+          pool. To unstake your principal, see &quot;Your stakes&quot; on your{" "}
+          <Link href="/profile" className="font-medium text-cobalt hover:underline">
+            profile page
+          </Link>
+          .
         </p>
       </div>
 
@@ -223,33 +217,23 @@ export function ClaimRewards() {
           <p className="text-sm text-slate">Sign in to see what you can claim.</p>
           <ConnectButton />
         </div>
-      ) : rows === null ? (
-        <p className="text-sm text-slate">Loading your positions…</p>
-      ) : rows.length === 0 ? (
-        <p className="text-sm text-slate">
-          You haven&apos;t voted or staked on any apps yet.{" "}
-          <Link href="/" className="font-medium text-cobalt hover:underline">
-            Discover an app
-          </Link>{" "}
-          to start earning rewards.
+      ) : isSimulationMode() ? (
+        <p className="rounded-lg border border-hairline bg-ivory p-3 text-xs text-slate-steel">
+          Running in simulation mode — pending rewards only exist once votes/stakes are settled on
+          a real deployment.
         </p>
+      ) : !wallet.publicKey ? (
+        <div className="space-y-2 rounded-lg border border-hairline bg-ivory p-3">
+          <p className="text-xs text-slate-steel">Connect your wallet to see what you can claim.</p>
+          <ConnectButton />
+        </div>
+      ) : rows === null ? (
+        <p className="text-sm text-slate">Loading your rewards…</p>
+      ) : rows.length === 0 ? (
+        <p className="text-sm text-slate">Nothing to claim right now — check back later.</p>
       ) : (
         <>
-          {isSimulationMode() ? (
-            <p className="rounded-lg border border-hairline bg-ivory p-3 text-xs text-slate-steel">
-              Running in simulation mode — pending rewards only exist once votes/stakes are
-              settled on a real deployment, so amounts aren&apos;t shown here.
-            </p>
-          ) : !wallet.publicKey ? (
-            <div className="space-y-2 rounded-lg border border-hairline bg-ivory p-3">
-              <p className="text-xs text-slate-steel">
-                Connect your wallet to see pending rewards for the positions below.
-              </p>
-              <ConnectButton />
-            </div>
-          ) : null}
-
-          {!isSimulationMode() && wallet.publicKey && claimableRows.length > 0 && (
+          {claimableRows.length > 1 && (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-mist p-3">
               <div>
                 <div className="text-xs text-slate-steel">Claimable now</div>
@@ -267,47 +251,34 @@ export function ClaimRewards() {
             </div>
           )}
 
-          <ul className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">
+          <ul className="max-h-[28rem] space-y-1.5 overflow-y-auto pr-1">
             {rows.map((row) => (
               <li
                 key={row.key}
-                className="flex items-center justify-between gap-3 rounded-lg border border-hairline p-3"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-hairline p-2"
               >
-                <div>
-                  <Link
-                    href={`/app/${row.appSlug}`}
-                    className="font-medium text-ink hover:text-cobalt"
-                  >
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <Link href={`/app/${row.appSlug}`} className="truncate text-sm font-medium text-ink hover:text-cobalt">
                     {row.appName}
                   </Link>
-                  <div className="text-xs text-slate-steel">
-                    {row.kind === "vote" ? (
-                      <>Vote · {formatToken(row.stakedAmount, TOKEN_SYMBOL)} staked</>
-                    ) : (
-                      <>
-                        #{row.tagName} tag · {formatToken(row.stakedAmount, TOKEN_SYMBOL)} staked
-                      </>
-                    )}
-                  </div>
+                  {row.kind === "tag" ? (
+                    <Link href={`/tags/${row.tagSlug}`} className="chip chip-active shrink-0 text-[10px]">
+                      #{row.tagName}
+                    </Link>
+                  ) : (
+                    <span className="chip shrink-0 text-[10px]">Vote</span>
+                  )}
                 </div>
-                <div className="flex items-center gap-3">
-                  <div className="text-right">
-                    <div className="text-xs text-slate-steel">Pending</div>
-                    <div className="font-mono text-sm font-medium tabular-nums text-ink">
-                      {row.pending == null ? "—" : formatToken(row.pending, TOKEN_SYMBOL)}
-                    </div>
-                  </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="font-mono text-xs font-medium tabular-nums text-ink">
+                    {formatToken(row.pending!, TOKEN_SYMBOL)}
+                  </span>
                   <button
                     className="btn-primary text-xs"
-                    disabled={
-                      claimingKey === row.key ||
-                      isSimulationMode() ||
-                      !wallet.publicKey ||
-                      !row.pending
-                    }
+                    disabled={claimingKey === row.key}
                     onClick={() => claim(row)}
                   >
-                    {claimingKey === row.key ? "Claiming…" : "Claim"}
+                    {claimingKey === row.key ? "…" : "Claim"}
                   </button>
                 </div>
               </li>

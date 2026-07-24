@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { handler, ok } from "@/lib/api";
+import { handler, ok, requireRateLimit, RATE_LIMITS } from "@/lib/api";
 import { fetchAppTagStake } from "@/lib/indexerClient";
 
 export const dynamic = "force-dynamic";
@@ -9,7 +9,8 @@ export const dynamic = "force-dynamic";
 // itself is a separate, global on-chain Tag account), proxied from the
 // indexer.
 export const GET = handler(
-  async (_req: NextRequest, ctx: { params: Promise<{ appId: string; tagSlug: string }> }) => {
+  async (req: NextRequest, ctx: { params: Promise<{ appId: string; tagSlug: string }> }) => {
+    await requireRateLimit(req, RATE_LIMITS.read);
     const { appId, tagSlug } = await ctx.params;
     const appTag = await fetchAppTagStake(appId, tagSlug);
     return ok({ appTag });

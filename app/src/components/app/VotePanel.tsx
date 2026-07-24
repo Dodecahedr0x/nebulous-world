@@ -2,14 +2,21 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BN } from "@anchor-lang/core";
 import { useAuth } from "@/components/providers/AuthProvider";
 import { useToast } from "@/components/ui/Toaster";
 import { useVoteProgram } from "@/hooks/useVoteProgram";
+import { useClaimRewards } from "@/hooks/useClaimRewards";
 import { isSimulationMode } from "@/lib/config";
-import { formatToken } from "@/lib/utils";
 import { TOKEN_SYMBOL } from "@/lib/constants";
+import { formatToken } from "@/lib/utils";
+import { fromRawAmount } from "@/lib/anchorClient";
 import { estimateUnstakeFee } from "@/lib/unstakeFee";
+import { settlePendingRaw } from "@/lib/rewards";
+import { apiGet } from "@/lib/txClient";
+import type { AppAccountData, PositionData } from "@/lib/indexerClient";
 import { ConnectButton } from "@/components/ConnectButton";
+import { UnstakeFeeNotice } from "@/components/UnstakeFeeNotice";
 
 const PRESETS = [10, 50, 100, 500];
 
@@ -22,6 +29,7 @@ export function VotePanel({ appId }: { appId: string }) {
   const router = useRouter();
   const toast = useToast();
   const { vote: castVote, withdrawVote } = useVoteProgram();
+  const { claimVoteReward } = useClaimRewards();
   const [amount, setAmount] = useState(50);
   const [busy, setBusy] = useState(false);
   const [myVote, setMyVote] = useState<{ id: string; amount: number } | null>(null);
@@ -30,9 +38,11 @@ export function VotePanel({ appId }: { appId: string }) {
   // separately from `myVote` (a Postgres row) since only the indexed
   // on-chain account carries this field.
   const [stakedAt, setStakedAt] = useState<number | null>(null);
-  // Whether the partial-withdrawal input is open.
-  const [withdrawOpen, setWithdrawOpen] = useState(false);
-  const [withdrawAmount, setWithdrawAmount] = useState(0);
+  // Pending NEB reward, settled live from the on-chain position + app
+  // accumulator (see lib/rewards.ts) — same claim path as the rewards
+  // page's ClaimRewards, surfaced here too so a user doesn't have to leave
+  // this app's page to claim what its own vote has earned.
+  const [pending, setPending] = useState<number | null>(null);
 
   useEffect(() => {
     if (!user) {
@@ -48,15 +58,66 @@ export function VotePanel({ appId }: { appId: string }) {
   useEffect(() => {
     if (!user || !myVote) {
       setStakedAt(null);
+      setPending(null);
       return;
     }
-    fetch(`/api/accounts/vote-position/${appId}?owner=${user.wallet}`)
-      .then((res) => res.json())
-      .then((json) => setStakedAt(json.ok ? (json.data.position?.stakedAt ?? null) : null))
-      .catch(() => setStakedAt(null));
+    let cancelled = false;
+
+    async function load() {
+      let position: PositionData | null = null;
+      try {
+        const res = await apiGet<{ position: PositionData | null }>(
+          `/api/accounts/vote-position/${appId}?owner=${user!.wallet}`,
+        );
+        position = res.position;
+      } catch {
+        position = null;
+      }
+      if (cancelled) return;
+      setStakedAt(position?.stakedAt ?? null);
+
+      if (!position || isSimulationMode()) {
+        setPending(null);
+        return;
+      }
+      try {
+        const { app } = await apiGet<{ app: AppAccountData | null }>(`/api/accounts/app/${appId}`);
+        if (cancelled) return;
+        setPending(
+          app
+            ? fromRawAmount(
+                settlePendingRaw(new BN(position.amount), new BN(position.rewardDebt), new BN(app.voteAccRewardPerShare)),
+              )
+            : null,
+        );
+      } catch {
+        if (!cancelled) setPending(null);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, [appId, user, myVote]);
 
   const unstakeFee = myVote && stakedAt !== null ? estimateUnstakeFee(myVote.amount, stakedAt) : null;
+
+  async function claim() {
+    setBusy(true);
+    try {
+      const { txSig, simulated } = await claimVoteReward(appId);
+      toast.success(
+        simulated ? "Claimed (simulated) — running without a live deployment" : "Claimed your vote reward",
+        txSig ? { txSig } : undefined,
+      );
+      setPending(0);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Claim failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function vote() {
     if (amount <= 0) return;
@@ -76,8 +137,8 @@ export function VotePanel({ appId }: { appId: string }) {
 
       toast.success(
         simulated
-          ? `Voted ${amount} ${TOKEN_SYMBOL} (simulated)`
-          : `Voted ${amount} ${TOKEN_SYMBOL} — tx confirmed`,
+          ? `Voted ${amount.toFixed(2)} ${TOKEN_SYMBOL} (simulated)`
+          : `Voted ${amount.toFixed(2)} ${TOKEN_SYMBOL} — tx confirmed`,
         txSig ? { txSig } : undefined,
       );
       router.refresh();
@@ -88,22 +149,16 @@ export function VotePanel({ appId }: { appId: string }) {
     }
   }
 
-  // `amount` omitted (or >= the full vote) withdraws everything; a smaller
-  // value does a partial withdrawal, mirroring withdraw_vote's on-chain
-  // `amount` param — see TagStakePanel's `withdraw` for the same pattern.
-  async function withdraw(amount?: number) {
+  async function withdraw() {
     if (!myVote) return;
-    const withdrawAmt = amount !== undefined ? Math.min(amount, myVote.amount) : myVote.amount;
-    if (withdrawAmt <= 0) return;
-    const isFull = withdrawAmt >= myVote.amount;
     setBusy(true);
     try {
-      const { txSig, simulated } = await withdrawVote(appId, withdrawAmt);
+      const { txSig, simulated } = await withdrawVote(appId, myVote.amount);
 
       const res = await fetch("/api/vote/withdraw", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ voteId: myVote.id, amount: isFull ? undefined : withdrawAmt }),
+        body: JSON.stringify({ voteId: myVote.id }),
       });
       const json = await res.json();
       if (!json.ok) throw new Error(json.error || "Withdraw failed");
@@ -114,12 +169,7 @@ export function VotePanel({ appId }: { appId: string }) {
           : "Vote withdrawn — tokens returned",
         txSig ? { txSig } : undefined,
       );
-      if (isFull) {
-        setMyVote(null);
-      } else {
-        setMyVote((prev) => (prev ? { ...prev, amount: prev.amount - withdrawAmt } : prev));
-      }
-      setWithdrawOpen(false);
+      setMyVote(null);
       router.refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Withdraw failed");
@@ -174,60 +224,29 @@ export function VotePanel({ appId }: { appId: string }) {
             disabled={busy || amount <= 0}
             onClick={vote}
           >
-            {busy ? "Voting…" : `Vote ${amount} ${TOKEN_SYMBOL}`}
+            {busy ? "Voting…" : `Vote ${amount.toFixed(2)} ${TOKEN_SYMBOL}`}
           </button>
           {myVote && (
-            <div className="space-y-1.5">
-              <button
-                className="btn-secondary w-full"
-                disabled={busy}
-                onClick={() => {
-                  if (withdrawOpen) {
-                    setWithdrawOpen(false);
-                  } else {
-                    setWithdrawOpen(true);
-                    setWithdrawAmount(myVote.amount);
-                  }
-                }}
-              >
-                {withdrawOpen ? "Cancel" : `Withdraw ${formatToken(myVote.amount, TOKEN_SYMBOL)}`}
-              </button>
-              {withdrawOpen && (
-                <div className="space-y-1.5 rounded-md bg-mist p-3">
-                  {stakedAt !== null &&
-                    (() => {
-                      const fee = estimateUnstakeFee(withdrawAmount, stakedAt);
-                      return (
-                        <div
-                          className="flex items-center gap-1 text-[11px] text-slate-steel"
-                          title="The early-unstake fee starts at 1% and decays linearly to 0% over the week after you voted."
-                        >
-                          <span>{fee.feeBps === 0 ? "No fee" : `${(fee.feeBps / 100).toFixed(2)}% fee`}</span>
-                          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border border-hairline text-[9px] leading-none text-slate-steel">
-                            i
-                          </span>
-                        </div>
-                      );
-                    })()}
-                  <input
-                    type="number"
-                    min={0}
-                    max={myVote.amount}
-                    step="any"
-                    className="input w-full text-sm"
-                    value={withdrawAmount}
-                    onChange={(e) =>
-                      setWithdrawAmount(Math.max(0, Math.min(myVote.amount, Number(e.target.value))))
-                    }
-                    aria-label="Withdraw amount"
-                  />
-                  <button
-                    className="btn-primary w-full text-sm"
-                    disabled={busy || withdrawAmount <= 0}
-                    onClick={() => withdraw(withdrawAmount)}
-                  >
-                    {busy ? "…" : "Confirm withdrawal"}
-                  </button>
+            <div className="space-y-1">
+              <div className="flex gap-2">
+                <button
+                  className="btn-secondary flex-1"
+                  disabled={busy}
+                  onClick={withdraw}
+                >
+                  {busy ? "…" : `Withdraw ${myVote.amount.toFixed(2)} ${TOKEN_SYMBOL}`}
+                </button>
+                <button
+                  className="btn-primary flex-1"
+                  disabled={busy || isSimulationMode() || !pending}
+                  onClick={claim}
+                >
+                  {busy ? "…" : pending ? `Claim ${formatToken(pending, "")} ${TOKEN_SYMBOL}` : "Claim"}
+                </button>
+              </div>
+              {unstakeFee && (
+                <div className="flex justify-center">
+                  <UnstakeFeeNotice feeBps={unstakeFee.feeBps} />
                 </div>
               )}
             </div>

@@ -1515,12 +1515,14 @@ async fn get_platform_metrics_history(
         FROM (
             SELECT captured_at, app_count, tag_count, total_vote_stake, total_tag_stake
             FROM platform_metrics_snapshot
+            WHERE captured_at > now() - make_interval(days => $1)
             ORDER BY captured_at DESC
             LIMIT 2000
         ) recent
         ORDER BY captured_at ASC
         "#,
     )
+    .bind(crate::handlers::platform::PLATFORM_TREND_WINDOW_DAYS as i32)
     .fetch_all(&state.pool)
     .await
     .map_err(internal)?;

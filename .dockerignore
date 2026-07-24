@@ -1,0 +1,23 @@
+# Keeps the indexer's Docker build context lean — see render.yaml's
+# nebulous-world-indexer service, dockerContext: . (repo root, needed
+# because indexer/Cargo.toml is now a member of the root Cargo workspace,
+# see /Cargo.toml). indexer/Dockerfile only COPYs Cargo.toml, Cargo.lock,
+# programs/nebulous_world, indexer/{Cargo.toml,src,decoder,migrations,
+# dlmm-bridge} — everything below would just bloat the build upload with
+# no benefit, or (worse) leak local secrets/dev artifacts into an image
+# layer.
+.git
+.worktrees
+node_modules
+**/target
+.next
+.anchor
+.surfpool
+app
+docs-site
+indexer/dlmm-bridge/node_modules
+indexer/dlmm-bridge/dist
+.env
+.env.*
+*.log
+.DS_Store

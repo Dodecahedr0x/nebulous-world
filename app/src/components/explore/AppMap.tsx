@@ -2,7 +2,7 @@
 
 import { formatToken, formatNumber } from "@/lib/utils";
 import { TOKEN_SYMBOL } from "@/lib/constants";
-import type { AppGraph } from "@/lib/indexerClient";
+import type { AppGraph, MapRangeFilters } from "@/lib/indexerClient";
 type AppGraphNode = AppGraph["nodes"][number];
 type AppGraphEdge = AppGraph["edges"][number];
 import { ForceMap, type MapLink, type MapNode } from "./ForceMap";
@@ -41,14 +41,20 @@ const FALLBACK_LINKS: MapLink[] = [
 export function AppMap({
   onSelect,
   selectedTags = [],
+  ranges,
 }: {
   onSelect?: (node: MapNode | null, neighborIds: string[]) => void;
   selectedTags?: string[];
+  /** Advanced-search range filters (min/max app stake, tag count, pageviews) — applied server-side, see /api/apps/graph. */
+  ranges?: MapRangeFilters;
 }) {
-  const fetchUrl =
-    selectedTags.length > 0
-      ? `/api/apps/graph?tags=${encodeURIComponent(selectedTags.join(","))}`
-      : "/api/apps/graph";
+  const sp = new URLSearchParams();
+  if (selectedTags.length > 0) sp.set("tags", selectedTags.join(","));
+  for (const [key, value] of Object.entries(ranges ?? {})) {
+    if (value) sp.set(key, value);
+  }
+  const qs = sp.toString();
+  const fetchUrl = `/api/apps/graph${qs ? `?${qs}` : ""}`;
 
   return (
     <ForceMap<AppGraphNode, AppGraphEdge>

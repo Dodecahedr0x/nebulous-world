@@ -58,11 +58,15 @@ interface ForceMapProps<RawNode, RawLink> {
   emptyMessage?: string;
   // Programmatically selects the node with this id — e.g. a caller-side
   // search/autocomplete picking a node without the user clicking it
-  // directly. A fresh object each time (not just a changed `id`) is what
-  // triggers it: selection state lives inside this component's own
-  // imperative canvas closure, not in React state a parent could otherwise
-  // diff against, so re-selecting the SAME id twice in a row (e.g. picking
-  // it again after clicking a different node on the canvas directly in
+  // directly, or a URL query param seeding the initial selection (see
+  // TagChip/ExploreMaps) before this map has even fetched its data yet — see
+  // `pendingSelectRequestRef` for how that still applies once the
+  // simulation actually starts, instead of silently no-op-ing. A fresh
+  // object each time (not just a changed `id`) is what triggers a NEW
+  // selection: selection state lives inside this component's own imperative
+  // canvas closure, not in React state a parent could otherwise diff
+  // against, so re-selecting the SAME id twice in a row (e.g. picking it
+  // again after clicking a different node on the canvas directly in
   // between) needs a new object reference to be noticed at all — see the
   // effect below.
   selectRequest?: { id: string } | null;
@@ -217,6 +221,16 @@ export function ForceMap<RawNode, RawLink>({
   // sr-only list's select action (keyboard/screen-reader path) reports the
   // same "connected peers" a mouse click would, instead of an empty array.
   const neighborsRef = useRef<Map<string, Set<string>>>(new Map());
+  // Always the latest `selectRequest` prop, readable from inside `start()`
+  // (a separate closure that only re-runs on `fetchUrl` changes — see that
+  // effect's own deps comment). Lets a `selectRequest` already set BEFORE
+  // the simulation finishes loading (e.g. one seeded from a URL query param
+  // at mount, landing well before the live fetch resolves) still apply the
+  // instant `start()` sets up `externalSelectRef` below, instead of being
+  // silently dropped — see the effect below `start()`'s definition for why
+  // that's otherwise a real gap, not just a theoretical one.
+  const pendingSelectRequestRef = useRef(selectRequest);
+  pendingSelectRequestRef.current = selectRequest;
 
   useEffect(() => {
     let cancelled = false;
@@ -607,6 +621,15 @@ export function ForceMap<RawNode, RawLink>({
         selectNode(id ? nodes.find((n) => n.id === id) ?? null : null);
       };
 
+      // A `selectRequest` set before the simulation was ready (see
+      // `pendingSelectRequestRef`'s doc comment) is applied now, the instant
+      // it's actually possible to — the effect below only re-fires on a
+      // *change* to `selectRequest`, which never happens for a value that
+      // was already there at mount.
+      if (pendingSelectRequestRef.current) {
+        externalSelectRef.current(pendingSelectRequestRef.current.id);
+      }
+
       // Wheel = zoom to cursor. Listened natively (not React's onWheel) so
       // preventDefault reliably stops page scroll while the cursor is over
       // the map, which requires an explicit non-passive listener.
@@ -729,8 +752,9 @@ export function ForceMap<RawNode, RawLink>({
   // `selectRequest`'s doc comment on `ForceMapProps` for why that needs a
   // fresh object reference rather than an id-equality check to notice.
   // No-ops harmlessly if the simulation hasn't started yet (externalSelectRef
-  // still unset) — a caller driving this is expected to wait for a user
-  // interaction first, by which point the map has virtually always loaded.
+  // still unset) — covered separately by `pendingSelectRequestRef` above,
+  // which is what actually applies a request that was already set at mount
+  // (before the simulation had a chance to start) once it does.
   useEffect(() => {
     if (selectRequest) externalSelectRef.current?.(selectRequest.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps

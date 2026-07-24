@@ -2,7 +2,6 @@ import Image from "next/image";
 import Link from "next/link";
 import type { AppDTO } from "@/lib/types";
 import { formatToken, formatNumber, hostname, cn, topStakedTag, formatDelta } from "@/lib/utils";
-import { CardVoteButton } from "@/components/app/CardVoteButton";
 import { TagChip } from "@/components/app/TagChip";
 
 // Caps the chips shown on a card — an app can carry arbitrarily many tags
@@ -139,13 +138,6 @@ export function AppCard({
           intervalDays={app.trend?.intervalDays}
         />
       </div>
-      {!preview && (
-        <div className="border-t border-hairline p-4 pt-0">
-          <div className="pt-3">
-            <CardVoteButton appId={app.id} voteWeight={app.voteWeight} />
-          </div>
-        </div>
-      )}
     </>
   );
 

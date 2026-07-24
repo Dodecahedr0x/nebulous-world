@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { SearchResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useMountTransition } from "@/hooks/useMountTransition";
+import { TagAutocomplete } from "@/components/explore/TagAutocomplete";
 
 // Kept in sync with the panel's `duration-150` exit transition — it stays
 // mounted this long after closing so the fade/scale-out can play instead of
@@ -43,7 +44,8 @@ interface Props {
   onClear: () => void;
 }
 
-function RangeRow({
+/** Exported for reuse by the maps' advanced-search panel (see explore/MapFilterPanel.tsx) — same min/max number-input pair UI. */
+export function RangeRow({
   label,
   minKey,
   maxKey,
@@ -116,21 +118,9 @@ export function FilterPanel({
 }: Props) {
   const [isOpen, setIsOpen] = useState(false);
   const { rendered: panelRendered, visible: panelVisible } = useMountTransition(isOpen, EXIT_MS);
-  const [tagSearch, setTagSearch] = useState("");
 
   const activeCount = countActiveFilters(selectedTags, ranges, fuzzy);
   const hasFilters = activeCount > 0;
-
-  // Live-filter the tag list by the search box, but never hide a tag that's
-  // currently selected — losing sight of an active filter while typing would
-  // be confusing.
-  const visibleTags = useMemo(() => {
-    const q = tagSearch.trim().toLowerCase();
-    if (!q) return facets.tags;
-    return facets.tags.filter(
-      (t) => t.name.toLowerCase().includes(q) || selectedTags.includes(t.slug),
-    );
-  }, [facets.tags, tagSearch, selectedTags]);
 
   return (
     <div className="fixed right-4 top-24 z-40 flex flex-col items-end">
@@ -169,7 +159,7 @@ export function FilterPanel({
         <div
           id="discover-filter-panel"
           className={cn(
-            "card mt-0 max-h-[75vh] w-72 origin-top-right space-y-5 overflow-y-auto rounded-tr-none p-4 transition-opacity duration-150 motion-safe:transition-[opacity,transform]",
+            "card mt-0 max-h-[75vh] w-[calc(100vw-2rem)] origin-top-right space-y-5 overflow-y-auto rounded-tr-none p-4 transition-opacity duration-150 motion-safe:transition-[opacity,transform] sm:w-72",
             panelVisible ? "opacity-100 motion-safe:scale-100" : "opacity-0 motion-safe:scale-95",
           )}
         >
@@ -189,31 +179,23 @@ export function FilterPanel({
             <h3 className="mb-2 text-caption font-semibold uppercase tracking-[0.077em] text-slate-steel">
               Tags
             </h3>
-            <input
-              className="input mb-2 px-2 py-1.5 text-sm"
+            <TagAutocomplete
+              options={facets.tags.map((t) => ({ id: t.slug, name: t.name, meta: String(t.count) }))}
+              excludeIds={selectedTags}
+              onSelect={onToggleTag}
               placeholder="Search tags…"
-              value={tagSearch}
-              onChange={(e) => setTagSearch(e.target.value)}
-              aria-label="Search tags"
+              ariaLabel="Search tags"
             />
-            <div className="flex max-h-48 flex-wrap gap-1.5 overflow-y-auto">
-              {visibleTags.length === 0 ? (
-                <span className="text-xs text-slate-steel">No matching tags.</span>
-              ) : (
-                visibleTags.map((t) => (
-                  <button
-                    key={t.slug}
-                    onClick={() => onToggleTag(t.slug)}
-                    className={cn(
-                      "chip",
-                      selectedTags.includes(t.slug) && "chip-active",
-                    )}
-                  >
-                    #{t.name} <span className="text-slate-steel">{t.count}</span>
+            {selectedTags.length > 0 && (
+              <div className="mt-2 flex max-h-48 flex-wrap gap-1.5 overflow-y-auto">
+                {selectedTags.map((slug) => (
+                  <button key={slug} onClick={() => onToggleTag(slug)} className="chip chip-active">
+                    #{facets.tags.find((t) => t.slug === slug)?.name ?? slug}
+                    <span aria-hidden="true">✕</span>
                   </button>
-                ))
-              )}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div>

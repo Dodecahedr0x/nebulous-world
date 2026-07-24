@@ -58,6 +58,13 @@ services:
       - key: AD_CPM
         value: "2.5"
 
+      # Google AdSense site tag (Auto ads) — see
+      # src/components/ads/AdSenseScript.tsx and .env.example's comment.
+      # Not secret (it's emitted into every page's HTML regardless), so this
+      # is set directly rather than sync: false.
+      - key: NEXT_PUBLIC_ADSENSE_PUBLISHER_ID
+        value: ca-pub-3646035530294447
+
       # --- Cloudflare Turnstile (leave unset to run without bot verification;
       # page views are then recorded as not revenue-eligible) ---
       - key: NEXT_PUBLIC_TURNSTILE_SITE_KEY
@@ -126,7 +133,13 @@ services:
     name: nebulous-world-indexer
     runtime: docker
     repo: https://github.com/Dodecahedr0x/appmap
-    dockerContext: indexer
+    # Repo root, not `indexer` — indexer/Cargo.toml is now a member of the
+    # root Cargo workspace (see /Cargo.toml), so the build needs the root
+    # manifest/lockfile plus every workspace member's source (indexer/
+    # depends on both `programs/nebulous_world` and `indexer/decoder` via
+    # workspace-relative path deps) — see indexer/Dockerfile's own COPY
+    # steps, which are root-relative to match.
+    dockerContext: .
     dockerfilePath: indexer/Dockerfile
     plan: starter
     region: oregon

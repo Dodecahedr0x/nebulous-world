@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { handler, ok, ApiError } from "@/lib/api";
+import { handler, ok, ApiError, requireRateLimit, RATE_LIMITS } from "@/lib/api";
 import { fetchVotePosition } from "@/lib/indexerClient";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
 // a plain query param rather than requiring an authenticated session.
 export const GET = handler(
   async (req: NextRequest, ctx: { params: Promise<{ appId: string }> }) => {
+    await requireRateLimit(req, RATE_LIMITS.read);
     const { appId } = await ctx.params;
     const owner = req.nextUrl.searchParams.get("owner");
     if (!owner) throw new ApiError("owner is required", 400);

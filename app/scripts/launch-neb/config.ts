@@ -14,7 +14,7 @@ function expandHome(path: string): string {
 
 const pubkeySchema = z.string().min(32).max(64);
 
-const tokenSchema = z.object({
+export const tokenSchema = z.object({
   name: z.string().min(1).max(32),
   symbol: z.string().min(1).max(10),
   decimals: z.number().int().min(0).max(9).default(6),
@@ -28,7 +28,7 @@ const tokenSchema = z.object({
   isMutable: z.boolean().default(true),
 });
 
-const poolSchema = z.object({
+export const poolSchema = z.object({
   // Price increment between adjacent bins, in basis points. Smaller = finer
   // granularity but fewer bins covered per position.
   binStep: z.number().int().positive(),

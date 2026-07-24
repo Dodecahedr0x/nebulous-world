@@ -24,14 +24,13 @@ export function shortAddress(addr: string, chars = 4): string {
   return `${addr.slice(0, chars)}…${addr.slice(-chars)}`;
 }
 
-/** Format a token amount with thousands separators and sensible precision. */
+/** Format a token amount with thousands separators, never more than 2 decimals. */
 export function formatToken(amount: number, symbol = "NEB"): string {
   const abs = Math.abs(amount);
   let str: string;
   if (abs >= 1_000_000) str = (amount / 1_000_000).toFixed(2) + "M";
   else if (abs >= 1_000) str = (amount / 1_000).toFixed(2) + "K";
-  else if (abs >= 1) str = amount.toFixed(2);
-  else str = amount.toPrecision(3);
+  else str = amount.toFixed(2);
   return symbol ? `${str} ${symbol}` : str;
 }
 

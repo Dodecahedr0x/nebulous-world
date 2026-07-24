@@ -3,14 +3,22 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { BN } from "@anchor-lang/core";
 import { useAuth } from "@/components/providers/AuthProvider";
 import { useToast } from "@/components/ui/Toaster";
 import { useTagStakeProgram } from "@/hooks/useTagStakeProgram";
 import { useCreateAppProgram } from "@/hooks/useCreateAppProgram";
+import { useClaimRewards } from "@/hooks/useClaimRewards";
 import { useMountTransition } from "@/hooks/useMountTransition";
 import { cn, formatToken, slugify } from "@/lib/utils";
 import { TOKEN_SYMBOL } from "@/lib/constants";
+import { isSimulationMode } from "@/lib/config";
 import { estimateUnstakeFee } from "@/lib/unstakeFee";
+import { settlePendingRaw } from "@/lib/rewards";
+import { fromRawAmount } from "@/lib/anchorClient";
+import { apiGet } from "@/lib/txClient";
+import type { AppAccountData, PositionData } from "@/lib/indexerClient";
+import { UnstakeFeeNotice } from "@/components/UnstakeFeeNotice";
 import type { TagDTO } from "@/lib/types";
 
 /**
@@ -30,12 +38,15 @@ export function TagStakePanel({
   const toast = useToast();
   const { stakeTag, withdrawTagStake } = useTagStakeProgram();
   const { suggestTag } = useCreateAppProgram();
+  const { claimTagReward } = useClaimRewards();
 
   const [stakingId, setStakingId] = useState<string | null>(null);
   const { rendered: revealRendered, visible: revealVisible } = useMountTransition(stakingId, 200);
-  // Tag whose partial-withdrawal input is currently open.
-  const [withdrawPendingId, setWithdrawPendingId] = useState<string | null>(null);
-  const [withdrawAmount, setWithdrawAmount] = useState(0);
+  const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
+  const { rendered: withdrawRevealRendered, visible: withdrawRevealVisible } = useMountTransition(
+    withdrawingId,
+    200,
+  );
   const [stakeAmount, setStakeAmount] = useState(100);
   const [busy, setBusy] = useState(false);
   const [newTag, setNewTag] = useState("");
@@ -46,6 +57,10 @@ export function TagStakePanel({
   // button. Fetched per-tag since only the indexed on-chain account (not
   // the Postgres `myStakes` row) carries this field.
   const [stakedAtByTag, setStakedAtByTag] = useState<Record<string, number>>({});
+  // appTagId -> pending NEB reward, settled live from the on-chain position
+  // + this app's tagsAccRewardPerShare (see lib/rewards.ts) — same claim
+  // path as the rewards page's ClaimRewards, surfaced here too.
+  const [pendingByTag, setPendingByTag] = useState<Record<string, number>>({});
 
   useEffect(() => {
     if (!user) {
@@ -69,35 +84,82 @@ export function TagStakePanel({
     const tagIds = Object.keys(myStakes);
     if (!user || tagIds.length === 0) {
       setStakedAtByTag({});
+      setPendingByTag({});
       return;
     }
     let cancelled = false;
-    Promise.all(
-      tagIds.map(async (tagId) => {
-        const tag = tags.find((t) => t.id === tagId);
-        if (!tag) return null;
+
+    async function load() {
+      // One shared app-level fetch (tagsAccRewardPerShare) rather than one
+      // per tag — every tag's pending reward is computed against the same
+      // accumulator, just combined with that tag's own position amount/
+      // rewardDebt below.
+      let app: AppAccountData | null = null;
+      if (!isSimulationMode()) {
         try {
-          const res = await fetch(
-            `/api/accounts/stake-position/${appId}/${tag.slug}?owner=${user.wallet}`,
-          );
-          const json = await res.json();
-          return json.ok && json.data.position
-            ? ([tagId, json.data.position.stakedAt as number] as const)
-            : null;
+          const { app: fetched } = await apiGet<{ app: AppAccountData | null }>(`/api/accounts/app/${appId}`);
+          app = fetched;
         } catch {
-          return null;
+          app = null;
         }
-      }),
-    ).then((entries) => {
+      }
+
+      const entries = await Promise.all(
+        tagIds.map(async (tagId) => {
+          const tag = tags.find((t) => t.id === tagId);
+          if (!tag) return null;
+          try {
+            const res = await fetch(
+              `/api/accounts/stake-position/${appId}/${tag.slug}?owner=${user!.wallet}`,
+            );
+            const json = await res.json();
+            const position: PositionData | null = json.ok ? json.data.position : null;
+            if (!position) return null;
+            const pending = app
+              ? fromRawAmount(
+                  settlePendingRaw(new BN(position.amount), new BN(position.rewardDebt), new BN(app.tagsAccRewardPerShare)),
+                )
+              : null;
+            return [tagId, position.stakedAt as number, pending] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
       if (cancelled) return;
-      const map: Record<string, number> = {};
-      for (const entry of entries) if (entry) map[entry[0]] = entry[1];
-      setStakedAtByTag(map);
-    });
+      const stakedAtMap: Record<string, number> = {};
+      const pendingMap: Record<string, number> = {};
+      for (const entry of entries) {
+        if (!entry) continue;
+        const [tagId, stakedAt, pending] = entry;
+        stakedAtMap[tagId] = stakedAt;
+        if (pending != null) pendingMap[tagId] = pending;
+      }
+      setStakedAtByTag(stakedAtMap);
+      setPendingByTag(pendingMap);
+    }
+
+    load();
     return () => {
       cancelled = true;
     };
   }, [appId, user, myStakes, tags]);
+
+  async function claimTag(tagId: string, tagSlug: string) {
+    setBusy(true);
+    try {
+      const { txSig, simulated } = await claimTagReward(appId, tagSlug);
+      toast.success(
+        simulated ? "Claimed (simulated) — running without a live deployment" : `Claimed your #${tagSlug} reward`,
+        txSig ? { txSig } : undefined,
+      );
+      setPendingByTag((prev) => ({ ...prev, [tagId]: 0 }));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Claim failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function stake(appTagId: string, tagSlug: string) {
     if (stakeAmount <= 0) return;
@@ -113,8 +175,8 @@ export function TagStakePanel({
       if (!json.ok) throw new Error(json.error || "Stake failed");
       toast.success(
         simulated
-          ? `Staked ${stakeAmount} ${TOKEN_SYMBOL} (simulated)`
-          : `Staked ${stakeAmount} ${TOKEN_SYMBOL}`,
+          ? `Staked ${stakeAmount.toFixed(2)} ${TOKEN_SYMBOL} (simulated)`
+          : `Staked ${stakeAmount.toFixed(2)} ${TOKEN_SYMBOL}`,
         txSig ? { txSig } : undefined,
       );
       setStakingId(null);
@@ -126,24 +188,17 @@ export function TagStakePanel({
     }
   }
 
-  // `amount` omitted (or >= the full stake) withdraws everything; a smaller
-  // value does a partial withdrawal, mirroring withdraw_tag_stake's on-chain
-  // `amount` param (see that instruction's handler — it reduces
-  // StakePosition.amount rather than closing the position).
-  async function withdraw(appTagId: string, tagSlug: string, amount?: number) {
+  async function withdraw(appTagId: string, tagSlug: string) {
     const mine = myStakes[appTagId];
     if (!mine) return;
-    const withdrawAmount = amount !== undefined ? Math.min(amount, mine.amount) : mine.amount;
-    if (withdrawAmount <= 0) return;
-    const isFull = withdrawAmount >= mine.amount;
     setBusy(true);
     try {
-      const { txSig, simulated } = await withdrawTagStake(appId, tagSlug, withdrawAmount);
+      const { txSig, simulated } = await withdrawTagStake(appId, tagSlug, mine.amount);
 
       const res = await fetch("/api/stake/withdraw", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ stakeId: mine.id, amount: isFull ? undefined : withdrawAmount }),
+        body: JSON.stringify({ stakeId: mine.id }),
       });
       const json = await res.json();
       if (!json.ok) throw new Error(json.error || "Withdraw failed");
@@ -154,14 +209,10 @@ export function TagStakePanel({
       );
       setMyStakes((prev) => {
         const next = { ...prev };
-        if (isFull) {
-          delete next[appTagId];
-        } else {
-          next[appTagId] = { ...next[appTagId], amount: next[appTagId].amount - withdrawAmount };
-        }
+        delete next[appTagId];
         return next;
       });
-      setWithdrawPendingId(null);
+      setWithdrawingId(null);
       router.refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Withdraw failed");
@@ -210,87 +261,79 @@ export function TagStakePanel({
       ) : (
         <ul className="space-y-2">
           {tags.map((t) => (
-
-            <li key={t.id} className="rounded-lg border border-hairline p-2">
-              <div className="flex items-center justify-between gap-2">
-                <Link href={`/tags/${t.slug}`} className="truncate text-xs font-medium text-ink hover:text-cobalt">
+            <li key={t.id} className="space-y-2 rounded-lg border border-hairline p-3">
+              <div>
+                <Link href={`/tags/${t.slug}`} className="font-medium text-ink hover:text-cobalt">
                   #{t.name}
                 </Link>
-                <div className="flex shrink-0 items-center gap-1">
-                  {user && myStakes[t.id] && (
-                    <button
-                      className="rounded border border-hairline px-1.5 py-0.5 text-[10px] font-medium text-ink transition-colors hover:bg-mist disabled:opacity-60"
-                      disabled={busy}
-                      onClick={() => {
-                        if (withdrawPendingId === t.id) {
-                          setWithdrawPendingId(null);
-                        } else {
-                          setWithdrawPendingId(t.id);
-                          setWithdrawAmount(myStakes[t.id]!.amount);
-                        }
-                      }}
-                    >
-                      {withdrawPendingId === t.id ? "Cancel" : "Withdraw"}
-                    </button>
-                  )}
-                  {user && (
-                    <button
-                      className="rounded border border-hairline px-1.5 py-0.5 text-[10px] font-medium text-ink transition-colors hover:bg-mist"
-                      onClick={() => setStakingId(stakingId === t.id ? null : t.id)}
-                    >
-                      {stakingId === t.id ? "Cancel" : "Stake"}
-                    </button>
-                  )}
-                </div>
+                <span className="ml-2 text-xs text-slate-steel">
+                  {formatToken(t.stakeTotal, TOKEN_SYMBOL)} staked
+                </span>
               </div>
-              <p className="mt-0.5 text-[11px] tabular-nums text-slate-steel">
-                {formatToken(t.stakeTotal, "")}
-                {user && myStakes[t.id] && ` (${formatToken(myStakes[t.id]!.amount, "")})`} {TOKEN_SYMBOL}
-              </p>
-              {user && myStakes[t.id] && withdrawPendingId === t.id && (
-                <div className="mt-1.5 rounded-md bg-mist p-2">
-                  {stakedAtByTag[t.id] !== undefined &&
-                    (() => {
-                      const fee = estimateUnstakeFee(withdrawAmount, stakedAtByTag[t.id]!);
-                      return (
-                        <div
-                          className="inline-flex items-center gap-1 text-[11px] text-slate-steel"
-                          title="The early-unstake fee starts at 1% and decays linearly to 0% over the week after you staked."
-                        >
-                          <span>{fee.feeBps === 0 ? "No fee" : `${(fee.feeBps / 100).toFixed(2)}% fee`}</span>
-                          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border border-hairline text-[9px] leading-none text-slate-steel">
-                            i
-                          </span>
-                        </div>
-                      );
-                    })()}
-                  <div className="mt-1.5 flex items-center gap-1">
-                    <input
-                      type="number"
-                      min={0}
-                      max={myStakes[t.id]!.amount}
-                      step="any"
-                      className="input text-xs"
-                      value={withdrawAmount}
-                      onChange={(e) =>
-                        setWithdrawAmount(Math.max(0, Math.min(myStakes[t.id]!.amount, Number(e.target.value))))
-                      }
-                      aria-label="Withdraw amount"
-                    />
-                    <button
-                      className="btn-primary shrink-0 px-2 py-0.5 text-[11px]"
-                      disabled={busy || withdrawAmount <= 0}
-                      onClick={() => withdraw(t.id, t.slug, withdrawAmount)}
-                    >
-                      {busy ? "…" : "Confirm"}
-                    </button>
+              {/* This panel sits in the app page's sidebar column — narrow
+                  enough that three buttons (Withdraw, Claim, Stake) never
+                  fit on one line next to the tag info above, so this always
+                  stacks info above a button grid rather than trying to keep
+                  them side by side and wrapping unpredictably when there
+                  isn't room (a plain flex-wrap group used to drop to its own
+                  line under the info text, then wrap AGAIN inside itself,
+                  leaving whichever button didn't fit stranded alone). A
+                  2-column grid gives a controlled result at any count
+                  instead: pairs stack cleanly, and a leftover odd button
+                  (only Stake, or Withdraw+Claim+Stake) spans the full row
+                  rather than sitting alone in one half. */}
+              {(() => {
+                const buttonCount =
+                  (user && myStakes[t.id] ? 1 : 0) +
+                  (user && myStakes[t.id] && !isSimulationMode() ? 1 : 0) +
+                  (user ? 1 : 0);
+                return (
+                  <div className={cn("grid grid-cols-2 gap-2", buttonCount % 2 === 1 && "[&>:last-child]:col-span-2")}>
+                    {user && myStakes[t.id] && (
+                      <button
+                        className="btn-secondary text-xs"
+                        onClick={() => {
+                          setStakingId(null);
+                          setWithdrawingId(withdrawingId === t.id ? null : t.id);
+                        }}
+                      >
+                        Withdraw
+                      </button>
+                    )}
+                    {user && myStakes[t.id] && !isSimulationMode() && (
+                      <button
+                        className="btn-primary text-xs"
+                        disabled={busy || !pendingByTag[t.id]}
+                        onClick={() => claimTag(t.id, t.slug)}
+                      >
+                        {busy ? "…" : pendingByTag[t.id] ? `Claim ${formatToken(pendingByTag[t.id], "")}` : "Claim"}
+                      </button>
+                    )}
+                    {user && (
+                      <button
+                        className="btn-secondary text-xs"
+                        onClick={() => {
+                          setWithdrawingId(null);
+                          setStakingId(stakingId === t.id ? null : t.id);
+                        }}
+                      >
+                        {stakingId === t.id ? "Cancel" : "Stake"}
+                      </button>
+                    )}
                   </div>
+                );
+              })()}
+              {user && myStakes[t.id] && stakedAtByTag[t.id] !== undefined && (
+                <div className="mt-1">
+                  <UnstakeFeeNotice
+                    feeBps={estimateUnstakeFee(myStakes[t.id]!.amount, stakedAtByTag[t.id]!).feeBps}
+                  />
                 </div>
               )}
               {revealRendered === t.id && (
                 <div
                   className={cn(
-                    "mt-1.5 flex items-center gap-1.5 transition-opacity duration-200 motion-safe:transition-[opacity,transform]",
+                    "mt-3 flex flex-wrap items-center gap-2 transition-opacity duration-200 motion-safe:transition-[opacity,transform]",
                     revealVisible
                       ? "opacity-100 motion-safe:translate-y-0"
                       : "opacity-0 motion-safe:-translate-y-1",
@@ -299,7 +342,7 @@ export function TagStakePanel({
                   <input
                     type="number"
                     min={1}
-                    className="input text-xs"
+                    className="input min-w-0 flex-1"
                     value={stakeAmount}
                     onChange={(e) =>
                       setStakeAmount(Math.max(0, Number(e.target.value)))
@@ -307,7 +350,7 @@ export function TagStakePanel({
                     aria-label="Stake amount"
                   />
                   <button
-                    className="btn-primary shrink-0 px-2 py-0.5 text-[11px]"
+                    className="btn-primary shrink-0 text-sm"
                     disabled={busy}
                     onClick={() => stake(t.id, t.slug)}
                   >
@@ -315,8 +358,45 @@ export function TagStakePanel({
                   </button>
                 </div>
               )}
+              {withdrawRevealRendered === t.id && myStakes[t.id] && (
+                <div
+                  className={cn(
+                    "mt-3 space-y-2 transition-opacity duration-200 motion-safe:transition-[opacity,transform]",
+                    withdrawRevealVisible
+                      ? "opacity-100 motion-safe:translate-y-0"
+                      : "opacity-0 motion-safe:-translate-y-1",
+                  )}
+                >
+                  {/* A disabled number input here (the amount isn't
+                      editable — withdrawal is always the full stake)
+                      used to sit in the same row as Confirm/Cancel, but
+                      this sidebar is too narrow for all three to share a
+                      row: the input's flex-basis got squeezed down to a
+                      couple of characters, showing a truncated "3"
+                      instead of "365.86". Plain text on its own line has
+                      no width to clip against. */}
+                  <p className="text-sm text-slate">
+                    Withdraw all {formatToken(myStakes[t.id]!.amount, TOKEN_SYMBOL)}?
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      className="btn-primary text-sm"
+                      disabled={busy}
+                      onClick={() => withdraw(t.id, t.slug)}
+                    >
+                      {busy ? "…" : "Confirm"}
+                    </button>
+                    <button
+                      className="btn-secondary text-sm"
+                      disabled={busy}
+                      onClick={() => setWithdrawingId(null)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
             </li>
-
           ))}
         </ul>
       )}

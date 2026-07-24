@@ -59,29 +59,28 @@ export default async function RewardsPage() {
         description={
           <>
             Everything {TOKEN_SYMBOL} lives here: buy {TOKEN_NAME} on the public NEB/USDC pool,
-            watch its live indicators, and claim what your votes and tag stakes have earned —
-            without withdrawing your principal.
+            watch its live indicators, and claim what your votes and tag stakes have earned.
+            Manage or unstake your positions from your profile page.
           </>
         }
       />
 
       <div className="space-y-6">
         <BuyPanel />
+        <PlatformMetrics
+          stats={stats}
+          appsTrend={appsTrend}
+          tagsTrend={tagsTrend}
+          votesTrend={votesTrend}
+          stakeTrend={stakeTrend}
+          viewsTrend={viewsTrendPoints}
+          revenueTrend={revenueTrendPoints}
+          revenueTotal={revenueTotal}
+          wide
+        />
         <ClaimRewards />
         <CloseZeroStakeAccounts />
       </div>
-
-      <PlatformMetrics
-        stats={stats}
-        appsTrend={appsTrend}
-        tagsTrend={tagsTrend}
-        votesTrend={votesTrend}
-        stakeTrend={stakeTrend}
-        viewsTrend={viewsTrendPoints}
-        revenueTrend={revenueTrendPoints}
-        revenueTotal={revenueTotal}
-        wide
-      />
     </div>
   );
 }

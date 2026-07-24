@@ -37,6 +37,10 @@ sharing**.
 
 This is an Anchor workspace at the repo root (`Anchor.toml`, `Cargo.toml`,
 `programs/`, `tests/`) with the Next.js web app contained in [`app/`](app/).
+The root `Cargo.toml`'s `[workspace]` covers every Rust crate in the repo,
+not just the on-chain program — `programs/nebulous_world`, `indexer`, and
+`indexer/decoder` are all members, sharing one `Cargo.lock` — so `cargo
+build`/`test`/`clippy --workspace` from the repo root covers all three.
 Anchor-related commands (`anchor build`, `anchor deploy`, `anchor test`) run
 from the repo root. App commands (`npm run dev`, `npm test`, etc.) also run
 from the repo root — the root `package.json` proxies every `app/package.json`
@@ -127,6 +131,7 @@ Runnable from the repo root or from `app/` — identical either way.
 | `npm run settle:epoch` | Manual revenue settlement run (AdSense → on-chain reward funding) |
 | `npm run snapshot:daily` | Write today's `AppStatsSnapshot` row per app (for trend charts) |
 | `npm run launch:neb` | Mint NEB's full supply and seed the NEB/USDC Meteora DLMM pool (see below) |
+| `npm run deploy -- --config=./scripts/deploy/deploy.config.json` | End-to-end production/staging deploy: program deploy, Config init, NEB launch, Render env var sync, app seeding (see "Production deploy" below) |
 | `npm run apps:create-onchain` | Register every app in `scripts/appData/apps.json` on-chain (idempotent — see "Populating apps" below) |
 | `npm run apps:discover -- --tag=<tag>` | Use `claude -p` to find real apps matching a tag and append them to `scripts/appData/apps.json` |
 | `npm run apps:curate` | Local web UI (http://localhost:4400) to review/retag existing apps and approve `apps:discover` suggestions by hand |
@@ -201,6 +206,43 @@ running for real — the DLMM program rejects pool creation from a wallet
 holding only the freshly minted base token. Set the printed mint and pool
 addresses as `NEXT_PUBLIC_VOTE_TOKEN_MINT` and `NEXT_PUBLIC_NEB_DLMM_POOL`
 afterward.
+
+## Production deploy
+
+`app/scripts/deploy/` is the single entry point that runs every step above
+end to end from one config file, instead of by hand: Anchor program deploy,
+Config initialization, NEB token/DLMM launch, syncing `render.yaml`'s
+`sync: false` env vars via Render's API (and redeploying), and optionally
+seeding apps. It's the only piece of deploy automation in this repo —
+`render.yaml`'s services still autoDeploy on push to `main` on their own;
+this script exists for the one-time/occasional on-chain and Render-config
+side of standing up a real deployment.
+
+```bash
+cp scripts/deploy/deploy.config.example.jsonc scripts/deploy/deploy.config.json
+# edit deploy.config.json — see its comments for every field
+npm run deploy -- --config=./scripts/deploy/deploy.config.json
+```
+
+Defaults to `"dryRun": true`: every step (anchor commands, on-chain
+transactions, Render API calls) logs exactly what it would do without
+running anything for real. Review that output, set `"dryRun": false`, and
+run again. Each step also has its own `skip` flag, so a later run can redo
+just one step (e.g. only `render` after rotating `RENDER_API_KEY`, or only
+`seedApps` to grow the app list against an already-live deployment).
+
+`render.skip` defaults to `true` — the deploy script has no problem
+computing the values, it's reaching a real Render account that needs an
+explicit opt-in. With it left on, the script prints the exact env vars to
+set by hand in the dashboard instead (the same manual step described in
+"Populating apps" above); flip it off and set `RENDER_API_KEY` in the
+environment (never in the config file) plus each service's id to have it
+call Render's API directly.
+
+`anchor deploy` itself is only as safe as Anchor.toml: this script reads
+the program id already declared under `[programs.<cluster>]` and refuses to
+run if that section doesn't exist yet — add it by hand first (a one-time,
+high-stakes edit) rather than have a script generate program keypairs.
 
 ## Simulation vs on-chain mode
 

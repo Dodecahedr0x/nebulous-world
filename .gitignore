@@ -27,10 +27,9 @@ yarn-error.log*
 .surfpool
 **/*.rs.bk
 
-# indexer (separate Cargo workspace — kept isolated from the Anchor
-# program's on-chain dependency tree; see indexer/README.md)
-/indexer/target
-/indexer/decoder/target
+# indexer (a member of the root Cargo workspace — see /Cargo.toml — so its
+# build output lands in the shared /target above, not its own; dlmm-bridge
+# is a plain Node package, unaffected by that)
 /indexer/dlmm-bridge/node_modules
 /indexer/dlmm-bridge/dist
 

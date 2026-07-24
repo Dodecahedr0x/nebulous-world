@@ -97,14 +97,20 @@ where
 /// cursor, so a burst of more than `SIGNATURES_PAGE_LIMIT` (1000)
 /// signatures between polls can't silently drop the older ones the way a
 /// single un-paginated call would.
-pub async fn run(rpc_http_url: String, program_id: Pubkey, pool: PgPool, poll_interval_secs: u64) {
+pub async fn run(
+    rpc_http_url: String,
+    program_id: Pubkey,
+    pool: PgPool,
+    poll_interval_secs: u64,
+    http: reqwest::Client,
+) {
     let client = RpcClient::new(rpc_http_url);
     let decoder = NebulousWorldDecoder;
     let mut ticker = tokio::time::interval(Duration::from_secs(poll_interval_secs));
 
     loop {
         ticker.tick().await;
-        if let Err(e) = crawl_once(&client, &decoder, program_id, &pool).await {
+        if let Err(e) = crawl_once(&client, &decoder, program_id, &pool, &http).await {
             log::error!("crawler: tick failed: {e}");
         }
     }
@@ -178,6 +184,7 @@ async fn crawl_once(
     decoder: &NebulousWorldDecoder,
     program_id: Pubkey,
     pool: &PgPool,
+    http: &reqwest::Client,
 ) -> Result<()> {
     let until = load_cursor(pool).await?;
     let signatures = fetch_new_signatures(client, program_id, until).await?;
@@ -194,7 +201,7 @@ async fn crawl_once(
         }
         let signature = entry.signature.parse::<Signature>()?;
         if let Err(e) =
-            crawl_transaction(client, decoder, program_id, pool, signature, entry.slot).await
+            crawl_transaction(client, decoder, program_id, pool, signature, entry.slot, http).await
         {
             log::error!("crawler: failed to process {signature}: {e}");
         }
@@ -211,6 +218,7 @@ async fn crawl_transaction(
     pool: &PgPool,
     signature: Signature,
     slot: u64,
+    http: &reqwest::Client,
 ) -> Result<()> {
     let response = with_retry(|| async {
         client
@@ -327,6 +335,7 @@ async fn crawl_transaction(
                     Some(payer) => {
                         if let Err(e) = product::sync_app_from_init(
                             pool,
+                            http,
                             init_app,
                             &payer,
                             memo_text.as_deref(),

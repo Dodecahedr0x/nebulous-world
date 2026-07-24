@@ -7,6 +7,8 @@ import { cn } from "@/lib/utils";
 export interface TagOption {
   id: string;
   name: string;
+  /** Shown dimmed next to the name in the dropdown row — e.g. how many apps carry this tag. Purely cosmetic; omit for none. */
+  meta?: string;
 }
 
 // A dropdown longer than this stops being scannable at a glance — the
@@ -190,6 +192,7 @@ export function TagAutocomplete({
                 onMouseEnter={() => setHighlighted(i)}
               >
                 #{t.name}
+                {t.meta && <span className="text-slate-steel"> {t.meta}</span>}
               </button>
             </li>
           ))}

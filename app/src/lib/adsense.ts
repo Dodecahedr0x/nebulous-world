@@ -1,7 +1,17 @@
 // Thin wrapper around the AdSense Management API v2's reports:generate
-// endpoint. Requires an OAuth2 access token for a service/user account with
-// access to the AdSense property; token acquisition is out of scope here and
-// handled by the caller (the settlement script).
+// endpoint, plus the OAuth2 token refresh that feeds it an access token.
+//
+// AdSense's Management API has no service-account auth path — only user
+// OAuth consent (see https://developers.google.com/adsense/management/oauth).
+// A short-lived access token minted by hand would expire (~1hr) long before
+// the next scheduled settlement run, so `getAdsenseAccessToken` instead
+// mints a fresh one on every call from a long-lived refresh token — the
+// standard pattern for unattended server-side access to a Google API that
+// doesn't support service accounts. The refresh token itself is obtained
+// once, out-of-band, via a manual OAuth consent flow (e.g. Google's OAuth
+// Playground at https://developers.google.com/oauthplayground, using this
+// app's own client id/secret and the `adsense.readonly` scope) and doesn't
+// expire on its own — only on manual revocation or ~6 months of disuse.
 
 export interface EarningsPeriod {
   start: Date;
@@ -10,6 +20,43 @@ export interface EarningsPeriod {
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Exchanges the long-lived `ADSENSE_REFRESH_TOKEN` for a fresh, short-lived
+ * access token. Call this immediately before `fetchAdsenseEarnings` — the
+ * token isn't cached across calls, since settlement only runs a handful of
+ * times a week and a fresh token is one extra request, not worth the
+ * complexity of tracking expiry.
+ */
+export async function getAdsenseAccessToken(): Promise<string> {
+  const clientId = process.env.ADSENSE_CLIENT_ID;
+  const clientSecret = process.env.ADSENSE_CLIENT_SECRET;
+  const refreshToken = process.env.ADSENSE_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error(
+      "ADSENSE_CLIENT_ID / ADSENSE_CLIENT_SECRET / ADSENSE_REFRESH_TOKEN must all be configured",
+    );
+  }
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`AdSense token refresh failed ${res.status}: ${await res.text()}`);
+  }
+  const json = (await res.json()) as { access_token?: string };
+  if (!json.access_token) {
+    throw new Error("AdSense token refresh response had no access_token");
+  }
+  return json.access_token;
 }
 
 export async function fetchAdsenseEarnings(

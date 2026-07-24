@@ -534,7 +534,10 @@ fn tags_stake_value(app: &AppDto, selected: &[String]) -> f64 {
     }
 }
 
-fn in_range(value: f64, min: Option<f64>, max: Option<f64>) -> bool {
+/// Shared with `handlers::platform`'s app-graph/tag-pack range filters
+/// (the maps' "advanced search") — same range-check, applied over a
+/// different app subset than `search_apps` below.
+pub(crate) fn in_range(value: f64, min: Option<f64>, max: Option<f64>) -> bool {
     if let Some(min) = min {
         if value < min {
             return false;
@@ -806,21 +809,13 @@ async fn update_metadata(
     Path(id): Path<String>,
     Json(req): Json<UpdateMetadataReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    sqlx::query(
-        r#"
-        UPDATE "App" SET
-            "iconUrl" = COALESCE($2, "iconUrl"),
-            tagline = COALESCE(NULLIF($3, ''), tagline),
-            description = COALESCE(NULLIF($4, ''), description),
-            "updatedAt" = now()
-        WHERE id = $1
-        "#,
+    crate::processors::product::apply_metadata_update(
+        &state.pool,
+        &id,
+        req.icon_url.as_deref(),
+        req.tagline.as_deref(),
+        req.description.as_deref(),
     )
-    .bind(&id)
-    .bind(&req.icon_url)
-    .bind(&req.tagline)
-    .bind(&req.description)
-    .execute(&state.pool)
     .await
     .map_err(crate::api::internal)?;
     Ok(Json(serde_json::json!({ "ok": true })))

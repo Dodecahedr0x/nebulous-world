@@ -171,7 +171,10 @@ export function XpProgress() {
             to start earning XP.
           </p>
         ) : (
-          <ul className="space-y-2">
+          // Capped height + scroll — the API returns up to 50 events (see
+          // indexer/src/handlers/xp.rs's get_activity), which would
+          // otherwise stretch this section far past the rest of the page.
+          <ul className="max-h-96 space-y-2 overflow-y-auto pr-1">
             {activity.map((event) => (
               <li
                 key={event.id}

@@ -36,6 +36,8 @@ export async function ensureConfigInitialized(
   connection: Connection,
   programId: PublicKey,
   voteMint: PublicKey,
+  authority: Keypair,
+  protocolFeeBps = 250, // 2.5% — matches the Rust test default
 ): Promise<void> {
   const cfgPda = configPda(programId);
   if (await connection.getAccountInfo(cfgPda)) {
@@ -43,10 +45,7 @@ export async function ensureConfigInitialized(
     return;
   }
 
-  const devKeypair = Keypair.fromSecretKey(
-    Uint8Array.from(JSON.parse(readFileSync(DEV_KEYPAIR_PATH, "utf-8"))),
-  );
-  const provider = new AnchorProvider(connection, new Wallet(devKeypair), { commitment: "confirmed" });
+  const provider = new AnchorProvider(connection, new Wallet(authority), { commitment: "confirmed" });
   const program = new Program<NebulousWorld>(idl as NebulousWorld, provider);
   const [programDataPda] = PublicKey.findProgramAddressSync(
     [programId.toBuffer()],
@@ -54,10 +53,10 @@ export async function ensureConfigInitialized(
   );
 
   const sig = await program.methods
-    .initialize(250) // 2.5% protocol fee — arbitrary for local dev, matches the Rust test default
+    .initialize(protocolFeeBps)
     .accountsPartial({
       config: cfgPda,
-      authority: devKeypair.publicKey,
+      authority: authority.publicKey,
       voteMint,
       program: programId,
       programData: programDataPda,
@@ -77,10 +76,14 @@ async function main() {
     );
   }
   const connection = new Connection(config.solana.rpc, "confirmed");
+  const devKeypair = Keypair.fromSecretKey(
+    Uint8Array.from(JSON.parse(readFileSync(DEV_KEYPAIR_PATH, "utf-8"))),
+  );
   await ensureConfigInitialized(
     connection,
     new PublicKey(config.solana.programId),
     new PublicKey(config.solana.voteTokenMint),
+    devKeypair,
   );
 }
 
