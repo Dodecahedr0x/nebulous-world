@@ -1,3 +1,45 @@
+envVarGroups:
+  # Shared by nebulous-world (the app) and nebulous-world-indexer below —
+  # a single source of truth instead of two copies of each value that could
+  # silently drift apart. NEXT_PUBLIC_VOTE_TOKEN_MINT in particular MUST be
+  # identical on both: it's what src/api.rs (indexer) derives
+  # `user_token_account` ATAs against when building vote/stake/claim
+  # transactions, and what the app uses to decide whether it's in
+  # on-chain or simulation mode.
+  - name: solana-shared-config
+    envVars:
+      # The app only uses this to tell the connected wallet extension which
+      # chain it's operating on (see SolanaProvider.tsx) — it has no RPC
+      # connection of its own, every on-chain read/write goes through the
+      # indexer instead. The indexer uses it as its actual Solana RPC
+      # endpoint.
+      - key: NEXT_PUBLIC_SOLANA_RPC
+        value: https://api.devnet.solana.com
+      - key: NEXT_PUBLIC_SOLANA_CLUSTER
+        value: devnet
+      - key: NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID
+        value: EkQRRgRFd2FUedJnPVs2Xs6N7U2Jef5GrfwJ62UJZUXx
+      # Decimals of the vote/stake SPL mint. Both sides already default to
+      # 6 on their own if this is unset (config.ts on the app, config.rs on
+      # the indexer) — setting it once here just makes that shared default
+      # explicit instead of two separate hardcoded fallbacks.
+      - key: NEXT_PUBLIC_VOTE_TOKEN_DECIMALS
+        value: "6"
+      # Leave unset to run in off-chain "simulation" mode. Fill in once a
+      # real SPL vote-token mint exists for this deploy — being a group
+      # value, setting it here is enough to update both services at once.
+      - key: NEXT_PUBLIC_VOTE_TOKEN_MINT
+        sync: false
+
+  # Shared by nebulous-world (the app) and nebulous-world-daily-snapshot
+  # (the cron job) below — both only ever reach nebulous-world-indexer over
+  # Render's internal network (it's a private service, no public HTTP
+  # surface). See indexer/README.md and src/lib/indexerClient.ts.
+  - name: indexer-internal-url
+    envVars:
+      - key: INDEXER_API_URL
+        value: http://nebulous-world-indexer:8090
+
 services:
   - type: web
     name: nebulous-world
@@ -23,38 +65,17 @@ services:
       - key: NODE_ENV
         value: production
 
-      # --- Solana ---
-      # Only used to tell the connected wallet extension which chain it's
-      # operating on (see SolanaProvider.tsx) — this app has no RPC
-      # connection of its own. Every on-chain read/write goes through the
-      # indexer instead (see INDEXER_API_URL below and src/lib/indexerClient.ts).
-      - key: NEXT_PUBLIC_SOLANA_RPC
-        value: https://api.devnet.solana.com
-      - key: NEXT_PUBLIC_SOLANA_CLUSTER
-        value: devnet
-      - key: NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID
-        value: EkQRRgRFd2FUedJnPVs2Xs6N7U2Jef5GrfwJ62UJZUXx
-      - key: NEXT_PUBLIC_VOTE_TOKEN_DECIMALS
-        value: "6"
-      # Leave unset to run in off-chain "simulation" mode. Fill in once a
-      # real SPL vote-token mint / treasury address exist for this deploy —
-      # and set the same mint on nebulous-world-indexer below, which needs
-      # it to build vote/stake/claim transactions. The treasury address
-      # doubles as the x402 payTo for the priced /api/data/* endpoints (see
-      # app/src/lib/x402.ts) — those also stay in free/simulated mode until
-      # both of these are set.
-      - key: NEXT_PUBLIC_VOTE_TOKEN_MINT
-        sync: false
+      # --- Solana & indexer (see envVarGroups at the top of this file) ---
+      - fromGroup: solana-shared-config
+      - fromGroup: indexer-internal-url
+
+      # Treasury / program addresses (filled once the Anchor program is
+      # deployed). Doubles as the x402 `payTo` address for the priced
+      # /api/data/* endpoints (see src/lib/x402.ts) — those stay in
+      # free/simulated mode (no 402ing) until this and
+      # NEXT_PUBLIC_VOTE_TOKEN_MINT above are both set.
       - key: NEXT_PUBLIC_TREASURY_ADDRESS
         sync: false
-
-      # --- Indexer ---
-      # Render's internal service-to-service networking — nebulous-world-indexer
-      # is a private service (pserv), reachable only from other services in
-      # this account/region, never from the public internet. See
-      # indexer/README.md and src/lib/indexerClient.ts.
-      - key: INDEXER_API_URL
-        value: http://nebulous-world-indexer:8090
 
       # --- App config ---
       - key: TRACKING_SECRET
@@ -112,8 +133,7 @@ services:
     buildCommand: npm ci
     startCommand: npm run snapshot:daily
     envVars:
-      - key: INDEXER_API_URL
-        value: http://nebulous-world-indexer:8090
+      - fromGroup: indexer-internal-url
 
   # Carbon (https://github.com/sevenlabs-hq/carbon) indexer: watches every
   # account owned by the nebulous_world program and every instruction sent
@@ -154,19 +174,10 @@ services:
         fromDatabase:
           name: nebulous-world-db
           property: connectionString
-      - key: NEXT_PUBLIC_SOLANA_RPC
-        value: https://api.devnet.solana.com
-      - key: NEXT_PUBLIC_SOLANA_CLUSTER
-        value: devnet
-      - key: NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID
-        value: EkQRRgRFd2FUedJnPVs2Xs6N7U2Jef5GrfwJ62UJZUXx
-      # Must match nebulous-world's (the app service above) own
-      # NEXT_PUBLIC_VOTE_TOKEN_MINT — this is what src/api.rs derives
-      # `user_token_account` ATAs against when building vote/stake/claim
-      # transactions. Leave unset while the app itself is in simulation
-      # mode (it won't call the tx-build endpoints that need it).
-      - key: NEXT_PUBLIC_VOTE_TOKEN_MINT
-        sync: false
+
+      # --- Solana (see envVarGroups at the top of this file) ---
+      - fromGroup: solana-shared-config
+
       # NEB/USDC Meteora DLMM pool address — created by
       # app/scripts/launch-neb/ at deployment time, forwarded to the
       # dlmm-bridge sidecar (see dlmm-bridge/README.md). Leave unset until

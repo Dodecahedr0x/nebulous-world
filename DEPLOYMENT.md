@@ -215,11 +215,14 @@ Leave `dryRun: true` until you've reviewed the printed plan (computed active
 bin, mint params, pool params) — it sends nothing in dry-run mode. Once it
 runs for real, it prints the resulting mint and pool addresses as ready-to-paste
 `KEY="VALUE"` lines. Set those as `NEXT_PUBLIC_VOTE_TOKEN_MINT` and
-`NEXT_PUBLIC_NEB_DLMM_POOL` in `app/.env` (for the next phase) and — critically
-— in the Render service env vars for both `nebulous-world` and
-`nebulous-world-indexer` (phase 3). They must match on both services; the
+`NEXT_PUBLIC_NEB_DLMM_POOL` in `app/.env` (for the next phase) and —
+critically — on Render (phase 3): `NEXT_PUBLIC_VOTE_TOKEN_MINT` lives in the
+`solana-shared-config` env var group (`render.yaml`), so one dashboard edit
+there covers both `nebulous-world` and `nebulous-world-indexer` at once — the
 indexer derives token accounts against whatever mint the app tells it to use
-when it builds vote/stake/claim transactions.
+when it builds vote/stake/claim transactions, so the two can never be allowed
+to disagree. `NEXT_PUBLIC_NEB_DLMM_POOL` is indexer-only, set directly on
+`nebulous-world-indexer`.
 
 Leaving `NEXT_PUBLIC_VOTE_TOKEN_MINT` unset instead runs the whole product in
 **simulation mode** — votes/stakes recorded off-chain, no real token
@@ -314,19 +317,25 @@ confirm.
 
 `render.yaml` as checked in defaults every Solana-related var to **devnet**.
 For a devnet deployment these need no changes. For **mainnet**, update these
-on both the `nebulous-world` (app) and `nebulous-world-indexer` services in
-the Render dashboard (Environment tab) — they're not meant to be edited in
-`render.yaml` and committed, since some are per-deployment secrets:
+in the Render dashboard — they're not meant to be edited in `render.yaml` and
+committed, since some are per-deployment secrets. Four of them
+(`NEXT_PUBLIC_SOLANA_RPC`, `NEXT_PUBLIC_SOLANA_CLUSTER`,
+`NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID`, `NEXT_PUBLIC_VOTE_TOKEN_MINT`) live
+in the `solana-shared-config` env var group (Dashboard → **Env Groups** →
+`solana-shared-config`) rather than on either service directly — editing the
+group updates both `nebulous-world` and `nebulous-world-indexer` at once, so
+they can't drift out of sync with each other. The rest are per-service
+(Environment tab on that service):
 
-| Var | Service(s) | Devnet value (in `render.yaml`) | Mainnet value |
+| Var | Where | Devnet value (in `render.yaml`) | Mainnet value |
 | --- | --- | --- | --- |
-| `NEXT_PUBLIC_SOLANA_RPC` | app, indexer | `https://api.devnet.solana.com` | your paid RPC's HTTPS URL |
-| `NEXT_PUBLIC_SOLANA_CLUSTER` | app, indexer | `devnet` | `mainnet-beta` |
-| `NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID` | app, indexer | devnet program id | mainnet program id from phase 1 |
-| `NEXT_PUBLIC_VOTE_TOKEN_MINT` | app, indexer | unset (`sync: false`) | NEB mint from phase 2 — **must match on both services** |
-| `NEXT_PUBLIC_TREASURY_ADDRESS` | app | unset | a wallet you control (ideally a multisig) — also the x402 `payTo` for `/api/data/*` |
-| `NEXT_PUBLIC_NEB_DLMM_POOL` | indexer | unset | DLMM pool address from phase 2 |
-| `RPC_WS_URL` | indexer | unset (derived from the RPC URL) | only set this if your paid RPC's WebSocket endpoint uses a different host/port than the HTTPS one — see `indexer/src/config.rs`'s `default_ws_url` |
+| `NEXT_PUBLIC_SOLANA_RPC` | `solana-shared-config` group | `https://api.devnet.solana.com` | your paid RPC's HTTPS URL |
+| `NEXT_PUBLIC_SOLANA_CLUSTER` | `solana-shared-config` group | `devnet` | `mainnet-beta` |
+| `NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID` | `solana-shared-config` group | devnet program id | mainnet program id from phase 1 |
+| `NEXT_PUBLIC_VOTE_TOKEN_MINT` | `solana-shared-config` group | unset (`sync: false`) | NEB mint from phase 2 |
+| `NEXT_PUBLIC_TREASURY_ADDRESS` | `nebulous-world` service | unset | a wallet you control (ideally a multisig) — also the x402 `payTo` for `/api/data/*` |
+| `NEXT_PUBLIC_NEB_DLMM_POOL` | `nebulous-world-indexer` service | unset | DLMM pool address from phase 2 |
+| `RPC_WS_URL` | `nebulous-world-indexer` service | unset (derived from the RPC URL) | only set this if your paid RPC's WebSocket endpoint uses a different host/port than the HTTPS one — see `indexer/src/config.rs`'s `default_ws_url` |
 
 Everything else in `render.yaml` (build/start commands, service topology,
 the Postgres instance, `TRACKING_SECRET` auto-generation, plan/region) is

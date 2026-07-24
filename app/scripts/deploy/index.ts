@@ -142,7 +142,10 @@ async function runRenderSync(
   console.log("\n== Render env var sync ==");
   if (cfg.render.skip) {
     console.log("  skipped (render.skip: true — the default). Set these manually in the Render dashboard instead:");
-    if (voteMint) console.log(`    nebulous-world, nebulous-world-indexer: NEXT_PUBLIC_VOTE_TOKEN_MINT=${voteMint.toBase58()}`);
+    // NEXT_PUBLIC_VOTE_TOKEN_MINT lives in the "solana-shared-config" env
+    // var group (render.yaml) — one dashboard edit there covers both
+    // nebulous-world and nebulous-world-indexer.
+    if (voteMint) console.log(`    solana-shared-config group: NEXT_PUBLIC_VOTE_TOKEN_MINT=${voteMint.toBase58()}`);
     if (dlmmPool) console.log(`    nebulous-world-indexer: NEXT_PUBLIC_NEB_DLMM_POOL=${dlmmPool.toBase58()}`);
     if (cfg.render.treasuryAddress) console.log(`    nebulous-world: NEXT_PUBLIC_TREASURY_ADDRESS=${cfg.render.treasuryAddress}`);
     console.log(`    nebulous-world: NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID=${programId.toBase58()}`);
@@ -154,6 +157,14 @@ async function runRenderSync(
   }
 
   if (voteMint) {
+    // Still set per-service, not once on the "solana-shared-config" env var
+    // group render.yaml now defines: setEnvVar (render.ts) only wraps
+    // Render's per-service env-var endpoint, and a per-service value
+    // overrides whatever the service would otherwise inherit from a linked
+    // group. These two calls are what actually apply the value; the group's
+    // job is just to keep the two services from drifting apart when someone
+    // edits render.yaml or the dashboard by hand instead of running this
+    // script.
     await setEnvVar(webServiceId, "NEXT_PUBLIC_VOTE_TOKEN_MINT", voteMint.toBase58(), cfg.dryRun);
     await setEnvVar(indexerServiceId, "NEXT_PUBLIC_VOTE_TOKEN_MINT", voteMint.toBase58(), cfg.dryRun);
   }
