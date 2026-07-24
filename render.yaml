@@ -80,8 +80,6 @@ services:
       # --- App config ---
       - key: TRACKING_SECRET
         generateValue: true
-      - key: AD_CPM
-        value: "2.5"
 
       # Google AdSense site tag (Auto ads) — see
       # src/components/ads/AdSenseScript.tsx and .env.example's comment.
