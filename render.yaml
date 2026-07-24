@@ -4,7 +4,11 @@ services:
     runtime: node
     repo: https://github.com/Dodecahedr0x/appmap
     rootDir: app
-    plan: free
+    # Must be a paid plan: nebulous-world-indexer below is a private
+    # service, and Render's private networking (the http://nebulous-world-
+    # indexer:8090 URL in INDEXER_API_URL) isn't available to Free-tier
+    # instances, so a Free app can never reach it.
+    plan: starter
     region: oregon
     branch: main
     autoDeploy: true
