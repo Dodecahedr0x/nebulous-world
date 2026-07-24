@@ -10,7 +10,7 @@
 # deliberately stays TypeScript (reusing the already-tested
 # @meteora-ag/dlmm SDK) rather than being reimplemented in Rust — see
 # dlmm-bridge/README.md.
-FROM rust:1.83-slim-bookworm AS builder
+FROM rust:1.89-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
