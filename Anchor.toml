@@ -5,9 +5,6 @@ package_manager = "npm"
 resolution = true
 skip-lint = false
 
-[programs.devnet]
-nebulous_world = "EkQRRgRFd2FUedJnPVs2Xs6N7U2Jef5GrfwJ62UJZUXx"
-
 [programs.localnet]
 nebulous_world = "7AAwB8aHgmuz9yzYdo6gKjZRx5KkjePYHyuJEmrcRXgX"
 
