@@ -78,6 +78,14 @@ services:
         sync: false
 
       # --- App config ---
+      # Public origin used for metadataBase and absolute OpenGraph/canonical
+      # URLs (see src/lib/constants.ts). Not declared here previously, which
+      # meant production silently fell back to its own "http://localhost:3000"
+      # default. sync: false so a real deploy is forced to set it explicitly
+      # (this service's own onrender.com URL, or a custom domain once
+      # attached) rather than deploying with a wrong default.
+      - key: NEXT_PUBLIC_SITE_URL
+        sync: false
       - key: TRACKING_SECRET
         generateValue: true
 
