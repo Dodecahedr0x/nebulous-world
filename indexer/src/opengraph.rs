@@ -12,7 +12,37 @@ use regex::Regex;
 use sqlx::PgPool;
 use std::time::Duration;
 
-const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+// 10s, not the 5s this started at: measured against the real app list, a
+// handful of sites (minecraft.net, christies.com) consistently need more
+// than 5s to return their first byte, and the old value turned those into
+// permanent icon-less rows. Nothing waits on this — enrichment runs in a
+// detached task (see spawn_enrichment) — so a slower ceiling costs nothing
+// but the task living longer.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Tried in order until one yields metadata. A bot-shaped User-Agent gets
+/// refused or served a challenge page by a lot of the web:
+///
+/// 1. A plain browser UA. Cloudflare-fronted sites (solflare.com,
+///    openai.com) 403 an unrecognized crawler outright but serve a normal
+///    page to this.
+/// 2. `facebookexternalhit`, the canonical link-preview crawler. Some sites
+///    (reddit.com, tiktok.com, canva.com, perplexity.ai) go the other way —
+///    they gate og: tags behind a *recognized* preview crawler and emit
+///    nothing useful for a generic browser UA.
+///
+/// Caveat worth knowing before trusting entry 2: Cloudflare verifies
+/// known-crawler UAs against the operator's published IP ranges, so claiming
+/// to be Facebook from a datacenter IP can be treated more harshly than an
+/// unrecognized UA would be. It's a fallback, tried only after (1) has
+/// already failed, precisely because it can backfire.
+///
+/// Keep in sync with app/src/lib/opengraph.ts's `USER_AGENTS`.
+const USER_AGENTS: [&str; 2] = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) \
+     Chrome/126.0.0.0 Safari/537.36",
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+];
 // Enough for <head>; unlike app/src/lib/opengraph.ts this reads the whole
 // response before truncating rather than stopping the stream early — this
 // only ever runs once per newly-created app, in a detached background task
@@ -90,22 +120,68 @@ fn decode_entities(s: &str) -> String {
 
 /// Fetch `page_url` and extract its OpenGraph (falling back to Twitter card)
 /// metadata. Returns `None` on any network error, non-HTML response, or
-/// timeout, or if neither found anything — every caller treats this as "no
-/// data available", never as an error to propagate.
+/// timeout, or if nothing was found — every caller treats this as "no data
+/// available", never as an error to propagate.
+///
+/// Tries each of `USER_AGENTS` in turn and takes the first that yields
+/// anything, then logs a single line naming what every attempt hit. That
+/// log line is the point: this used to swallow all four failure modes
+/// silently and identically, so an app that never got an icon was
+/// indistinguishable from one whose site has no og: tags at all — the only
+/// way to tell them apart was to re-probe the site by hand from outside.
 async fn fetch_open_graph(http: &reqwest::Client, page_url: &str) -> Option<OpenGraphData> {
+    let mut failures = Vec::with_capacity(USER_AGENTS.len());
+    for user_agent in USER_AGENTS {
+        // The UA is the only thing that differs between attempts, so label
+        // each failure with it — "403 as browser, no og: tags as
+        // facebookexternalhit" is the shape that tells you which knob (if
+        // any) is worth turning next.
+        let label = if user_agent.starts_with("facebookexternalhit") {
+            "facebookexternalhit"
+        } else {
+            "browser"
+        };
+        match try_fetch_open_graph(http, page_url, user_agent).await {
+            Ok(data) => return Some(data),
+            Err(reason) => failures.push(format!("{label}: {reason}")),
+        }
+    }
+    log::info!(
+        "opengraph: no metadata for {page_url} ({})",
+        failures.join("; ")
+    );
+    None
+}
+
+/// One `fetch_open_graph` attempt with a fixed User-Agent. The `Err` string
+/// is a short human-readable reason, only ever used for the log line above.
+async fn try_fetch_open_graph(
+    http: &reqwest::Client,
+    page_url: &str,
+    user_agent: &str,
+) -> Result<OpenGraphData, String> {
     let res = http
         .get(page_url)
+        .header(reqwest::header::USER_AGENT, user_agent)
+        // Sent because a request with no `Accept` at all is itself a bot
+        // signal to some WAFs; harmless everywhere else.
         .header(
-            reqwest::header::USER_AGENT,
-            "Mozilla/5.0 (compatible; AppMapBot/1.0; +https://appmap)",
+            reqwest::header::ACCEPT,
+            "text/html,application/xhtml+xml,*/*",
         )
         .timeout(FETCH_TIMEOUT)
         .send()
         .await
-        .ok()?;
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("timeout after {}s", FETCH_TIMEOUT.as_secs())
+            } else {
+                format!("request failed ({e})")
+            }
+        })?;
 
     if !res.status().is_success() {
-        return None;
+        return Err(format!("HTTP {}", res.status().as_u16()));
     }
     let content_type = res
         .headers()
@@ -114,10 +190,13 @@ async fn fetch_open_graph(http: &reqwest::Client, page_url: &str) -> Option<Open
         .unwrap_or_default()
         .to_string();
     if !content_type.contains("html") {
-        return None;
+        return Err(format!("non-HTML response ({content_type})"));
     }
     let final_url = res.url().clone();
-    let bytes = res.bytes().await.ok()?;
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|e| format!("body read failed ({e})"))?;
     let cutoff = bytes.len().min(MAX_HTML_BYTES);
     let html = String::from_utf8_lossy(&bytes[..cutoff]);
 
@@ -141,9 +220,13 @@ async fn fetch_open_graph(http: &reqwest::Client, page_url: &str) -> Option<Open
     };
 
     if data.image_url.is_none() && data.title.is_none() && data.description.is_none() {
-        None
+        // A 200 with no usable og:/twitter: tags — the single most common
+        // outcome for sites that render their <head> client-side. Reported
+        // as a failure so the next User-Agent still gets its turn: some
+        // sites emit tags only for a recognized preview crawler.
+        Err("no og: or twitter: tags".to_string())
     } else {
-        Some(data)
+        Ok(data)
     }
 }
 

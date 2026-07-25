@@ -9,8 +9,34 @@ export interface OpenGraphData {
   description?: string;
 }
 
-const FETCH_TIMEOUT_MS = 5000;
+// 10s, not the 5s this started at: measured against the real app list, a
+// handful of sites (minecraft.net, christies.com) consistently need more than
+// 5s to return their first byte, and the old value turned those into permanent
+// icon-less rows.
+const FETCH_TIMEOUT_MS = 10_000;
 const MAX_HTML_BYTES = 1_000_000; // enough for <head>; avoids reading huge bodies
+
+// Tried in order until one yields metadata. A bot-shaped User-Agent gets
+// refused or served a challenge page by a lot of the web:
+//
+//  1. A plain browser UA. Cloudflare-fronted sites (solflare.com, openai.com)
+//     403 an unrecognized crawler outright but serve a normal page to this.
+//  2. facebookexternalhit, the canonical link-preview crawler. Some sites
+//     (reddit.com, tiktok.com, canva.com, perplexity.ai) go the other way —
+//     they gate og: tags behind a *recognized* preview crawler and emit
+//     nothing useful for a generic browser UA.
+//
+// Caveat worth knowing before trusting entry 2: Cloudflare verifies
+// known-crawler UAs against the operator's published IP ranges, so claiming to
+// be Facebook from a datacenter IP can be treated more harshly than an
+// unrecognized UA would be. It's a fallback, tried only after (1) has already
+// failed, precisely because it can backfire.
+//
+// Keep in sync with indexer/src/opengraph.rs's USER_AGENTS.
+const USER_AGENTS = [
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+  "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+] as const;
 
 function metaContent(html: string, patterns: RegExp[]): string | undefined {
   for (const pattern of patterns) {
@@ -68,20 +94,53 @@ async function readHead(res: Response, maxBytes: number): Promise<string> {
  * Fetch `pageUrl` and extract its OpenGraph (falling back to Twitter card)
  * metadata. Returns null on any network error, non-HTML response, or
  * timeout — callers should treat this as "no data available", not an error.
+ *
+ * Tries each of USER_AGENTS in turn and takes the first that yields anything,
+ * then logs a single line naming what every attempt hit. That log line is the
+ * point: this used to swallow all four failure modes silently and identically,
+ * so an app that never got an icon was indistinguishable from one whose site
+ * has no og: tags at all.
  */
 export async function fetchOpenGraph(pageUrl: string): Promise<OpenGraphData | null> {
+  const failures: string[] = [];
+  for (const userAgent of USER_AGENTS) {
+    // The UA is the only thing that differs between attempts, so label each
+    // failure with it — "403 as browser, no og: tags as facebookexternalhit"
+    // is the shape that tells you which knob (if any) is worth turning next.
+    const label = userAgent.startsWith("facebookexternalhit") ? "facebookexternalhit" : "browser";
+    const result = await attemptOpenGraph(pageUrl, userAgent);
+    if (result.data) return result.data;
+    failures.push(`${label}: ${result.failure}`);
+  }
+  console.warn(`opengraph: no metadata for ${pageUrl} (${failures.join("; ")})`);
+  return null;
+}
+
+/**
+ * One `fetchOpenGraph` attempt with a fixed User-Agent. `failure` is a short
+ * human-readable reason, only ever used for the log line above.
+ */
+async function attemptOpenGraph(
+  pageUrl: string,
+  userAgent: string,
+): Promise<{ data?: OpenGraphData; failure?: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
     const res = await fetch(pageUrl, {
       signal: controller.signal,
-      headers: { "user-agent": "Mozilla/5.0 (compatible; AppMapBot/1.0; +https://appmap)" },
+      headers: {
+        "user-agent": userAgent,
+        // Sent because a request with no `Accept` at all is itself a bot
+        // signal to some WAFs; harmless everywhere else.
+        accept: "text/html,application/xhtml+xml,*/*",
+      },
       redirect: "follow",
     });
-    if (!res.ok) return null;
+    if (!res.ok) return { failure: `HTTP ${res.status}` };
     const contentType = res.headers.get("content-type") ?? "";
-    if (!contentType.includes("html")) return null;
+    if (!contentType.includes("html")) return { failure: `non-HTML response (${contentType})` };
 
     const html = await readHead(res, MAX_HTML_BYTES);
 
@@ -103,9 +162,15 @@ export async function fetchOpenGraph(pageUrl: string): Promise<OpenGraphData | n
     if (rawTitle) data.title = decodeEntities(rawTitle);
     if (rawDescription) data.description = decodeEntities(rawDescription);
 
-    return Object.keys(data).length > 0 ? data : null;
-  } catch {
-    return null;
+    // A 200 with no usable og:/twitter: tags — the single most common outcome
+    // for sites that render their <head> client-side. Reported as a failure so
+    // the next User-Agent still gets its turn: some sites emit tags only for a
+    // recognized preview crawler.
+    if (Object.keys(data).length === 0) return { failure: "no og: or twitter: tags" };
+    return { data };
+  } catch (e) {
+    const aborted = e instanceof Error && e.name === "AbortError";
+    return { failure: aborted ? `timeout after ${FETCH_TIMEOUT_MS / 1000}s` : `request failed (${e})` };
   } finally {
     clearTimeout(timeout);
   }
