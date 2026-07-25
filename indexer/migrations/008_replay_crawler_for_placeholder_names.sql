@@ -1,0 +1,37 @@
+-- One-shot repair for the deployed App rows stuck showing their raw hex
+-- app_id as a title (name = slug = id).
+--
+-- The code half of this fix is in indexer/src/processors/product.rs:
+-- reconcile.rs seeds a placeholder App/Tag row (name = id) for any
+-- on-chain account the crawler hasn't replayed yet, and
+-- sync_app_from_init/sync_tag_from_suggest used to insert with
+-- `ON CONFLICT DO NOTHING` — a no-op against that placeholder, silently
+-- discarding the real name/slug/url when the crawler did reach the
+-- init_app/suggest_tag instruction. Those are now `ON CONFLICT DO UPDATE`.
+--
+-- That alone repairs nothing already in the database, though: it only
+-- corrects a row when the crawler re-processes that app's init_app, and
+-- crawler.rs resumes from the crawler_cursor signature, which is already
+-- well past them. Clearing the cursor makes the next tick pass
+-- `until: None` to getSignaturesForAddress (see crawl_once) and replay all
+-- program history, which is the only path that ever writes a real
+-- App/Tag name — those live in the transaction's companion SPL Memo, not
+-- in any on-chain account field and not in any table here, so no amount of
+-- SQL can reconstruct them locally.
+--
+-- Deliberately a migration rather than a startup flag or an env var:
+-- main.rs runs sqlx::migrate!() (via db::connect) before backfill,
+-- reconcile and the crawler, so the replay happens on the very next boot,
+-- and _sqlx_migrations makes every later boot skip it — this is a
+-- one-time replay, not a re-crawl on every restart.
+--
+-- The replay's side effects are idempotent: indexed_instruction and
+-- indexed_account upsert on their unique keys, apply_metadata_update never
+-- overwrites an already-set field (so OpenGraph enrichment isn't
+-- clobbered), and reconcile recomputes the cached stake totals from the
+-- on-chain aggregates regardless. The one non-neutral effect is XP:
+-- handlers::xp::award dedupes per ("userId", kind, "awardDate") against
+-- *today's* date, so each replayed submit_app/suggest_tag grants its
+-- submitter one extra point — capped by that index at one per kind per
+-- user per day.
+DELETE FROM crawler_cursor;
