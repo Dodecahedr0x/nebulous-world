@@ -115,6 +115,28 @@ services:
       - key: INDEXER_API_URL
         value: http://nebulous-world-indexer:8090
 
+  # Fills in icon/tagline/description for apps whose one-shot OpenGraph
+  # enrichment (indexer/src/opengraph.rs's spawn_enrichment, fired once at
+  # app-creation time) silently failed — a slow site, a JS-rendered SPA with
+  # no server-rendered og:image tag, a bot-blocking 403, etc. That one-shot
+  # attempt is never retried on its own, so without this cron a failed app
+  # stays iconless forever. Safe to re-run — see app/scripts/backfillOpengraph.ts's
+  # own doc comment; only touches apps still missing at least one field.
+  - type: cron
+    name: nebulous-world-og-backfill
+    runtime: node
+    repo: https://github.com/Dodecahedr0x/appmap
+    rootDir: app
+    plan: starter
+    # Offset from the midnight snapshot cron above so the two don't both hit
+    # the indexer's HTTP API at once.
+    schedule: "0 6 * * *"
+    buildCommand: npm ci
+    startCommand: npm run og:backfill
+    envVars:
+      - key: INDEXER_API_URL
+        value: http://nebulous-world-indexer:8090
+
   # Carbon (https://github.com/sevenlabs-hq/carbon) indexer: watches every
   # account owned by the nebulous_world program and every instruction sent
   # to it, runs periodic processing tasks that turn that raw on-chain data

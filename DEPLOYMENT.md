@@ -301,8 +301,9 @@ once its program is deployed and initialized.
 
 `render.yaml` at the repo root is a [Render Blueprint](https://render.com/docs/blueprint-spec)
 defining every service: the Next.js app, the indexer (private service), the
-Mintlify docs static site, a daily-snapshot cron job, and a managed Postgres
-instance. One Blueprint launch creates all of them wired together.
+Mintlify docs static site, a daily-snapshot cron job, an OpenGraph-backfill
+cron job, and a managed Postgres instance. One Blueprint launch creates all
+of them wired together.
 
 ### 5a. Launch the Blueprint
 
@@ -340,11 +341,11 @@ identical between environments — only the Solana-facing values change.
 - **Custom domains**: set `NEXT_PUBLIC_SITE_URL` (app) and optionally
   `NEXT_PUBLIC_DOCS_URL` once a custom docs domain is attached (defaults to
   the `nebulous-world-docs` service's own `onrender.com` URL otherwise).
-- **`nebulous-world-daily-snapshot`** (the cron service) and
-  `npm run settle:epoch` (revenue settlement — not currently scheduled in
-  `render.yaml`, run manually or add your own cron entry) both need the same
-  `INDEXER_API_URL` wiring already present for the app; nothing extra to
-  configure beyond what the Blueprint sets up.
+- **`nebulous-world-daily-snapshot`** and **`nebulous-world-og-backfill`**
+  (the cron services) and `npm run settle:epoch` (revenue settlement — not
+  currently scheduled in `render.yaml`, run manually or add your own cron
+  entry) all need the same `INDEXER_API_URL` wiring already present for the
+  app; nothing extra to configure beyond what the Blueprint sets up.
 
 ### 5d. Verify
 
