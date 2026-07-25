@@ -38,6 +38,7 @@ import { CATEGORIES, CHAINS } from "../src/lib/constants";
 import { config } from "../src/lib/config";
 import { mapWithConcurrency } from "./lib/concurrency";
 import { parseFlags } from "./lib/parseFlags";
+import { withRateLimitRetry } from "./lib/retry";
 import idl from "../../target/idl/nebulous_world.json";
 import type { NebulousWorld } from "../../target/types/nebulous_world";
 
@@ -143,7 +144,7 @@ async function createApp(
   const app = appPda(program.programId, appId);
   const label = entry.name ?? entry.url;
 
-  if (await provider.connection.getAccountInfo(app)) {
+  if (await withRateLimitRetry(() => provider.connection.getAccountInfo(app))) {
     return { status: "skipped", appId };
   }
   if (dryRun) return { status: "dry-run", appId };
@@ -182,7 +183,7 @@ async function createApp(
     }
 
     const tx = new Transaction().add(...instructions);
-    const sig = await provider.sendAndConfirm(tx, [payer]);
+    const sig = await withRateLimitRetry(() => provider.sendAndConfirm(tx, [payer]));
 
     if (extraTags.length > 0) {
       console.log(`  … ${label}: sending ${extraTags.length} additional tag(s) as separate transactions`);
@@ -200,7 +201,7 @@ async function createApp(
           systemProgram: SystemProgram.programId,
         })
         .instruction();
-      await provider.sendAndConfirm(new Transaction().add(extraIx), [payer]);
+      await withRateLimitRetry(() => provider.sendAndConfirm(new Transaction().add(extraIx), [payer]));
     }
 
     return { status: "created", appId, sig };
