@@ -112,15 +112,27 @@ async fn upsert_user_by_wallet(pool: &PgPool, wallet: &str) -> anyhow::Result<St
     Ok(id)
 }
 
-/// Creates the `App` row for a confirmed `init_app` instruction. `app_id`
-/// becomes `App.id` directly (see the Prisma schema's doc comment on `App`);
-/// `url` is `AppAccount.url` with `https://` prepended back on (it was
-/// trimmed off before being stored on-chain — see `indexer/src/api.rs`'s
-/// `init_app_ix`). `ON CONFLICT DO NOTHING`: this instruction can only ever
-/// succeed once on-chain for a given `app_id` (the account `init` constraint
-/// enforces that), so a second sighting only happens if the crawler
-/// reprocesses a signature after a restart before its cursor advanced —
-/// a harmless no-op, not a real update.
+/// Creates (or corrects) the `App` row for a confirmed `init_app`
+/// instruction. `app_id` becomes `App.id` directly (see the Prisma schema's
+/// doc comment on `App`); `url` is `AppAccount.url` with `https://`
+/// prepended back on (it was trimmed off before being stored on-chain — see
+/// `indexer/src/api.rs`'s `init_app_ix`).
+///
+/// `ON CONFLICT DO UPDATE`, not `DO NOTHING`: a row can already exist here
+/// even though this instruction can only ever succeed once on-chain for a
+/// given `app_id` (the account `init` constraint enforces that) —
+/// `reconcile.rs`'s startup safety net adds a placeholder row (`name = id`,
+/// i.e. the raw hex/uuid app id) for any on-chain app the crawler hasn't
+/// replayed yet. `DO NOTHING` here left that placeholder in place forever,
+/// since this is the only path that ever writes the real name/slug/url.
+/// Overwriting them unconditionally on conflict is safe either way: a
+/// crawler replay of an already-fully-synced signature (the other case that
+/// can hit this conflict, e.g. reprocessing after a crash mid-batch —
+/// see `crawler.rs`) recomputes the exact same values from the same
+/// on-chain instruction, so the "update" is a no-op in substance.
+/// `tagline`/`description`/`iconUrl`/etc. are deliberately left out of the
+/// `DO UPDATE` — those are filled in by `apply_metadata_update` below and
+/// must never be clobbered back to memo/placeholder values.
 pub async fn sync_app_from_init(
     pool: &PgPool,
     http: &reqwest::Client,
@@ -160,7 +172,11 @@ pub async fn sync_app_from_init(
             (id, slug, name, tagline, description, url, "iconUrl", category, chain,
              status, "submittedBy", "createdAt", "updatedAt")
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', $10, now(), now())
-        ON CONFLICT (id) DO NOTHING
+        ON CONFLICT (id) DO UPDATE SET
+            slug = EXCLUDED.slug,
+            name = EXCLUDED.name,
+            url = EXCLUDED.url,
+            "updatedAt" = now()
         "#,
     )
     .bind(&decoded.app_id)
@@ -180,10 +196,15 @@ pub async fn sync_app_from_init(
 
     // Fetch the app's own OpenGraph metadata in the background to fill in
     // whichever of icon/tagline/description the memo didn't already supply
-    // — see opengraph.rs's doc comment. Gated on `rows_affected() > 0` (a
-    // genuinely fresh row, not a re-seen signature on a crawler restart/
-    // replay) so re-processing already-synced history never re-fetches
-    // OpenGraph data for apps that already have it.
+    // — see opengraph.rs's doc comment. `rows_affected()` is always 1 now
+    // (INSERT or the ON CONFLICT DO UPDATE above), including for a
+    // placeholder row just getting corrected with its real name/slug/url —
+    // that case deliberately still enriches, since a reconcile-created
+    // placeholder never had OpenGraph data fetched for it either.
+    // apply_metadata_update below is idempotent (never overwrites an
+    // already-set field), so re-running this for an already-enriched app on
+    // a rare crawler replay (e.g. reprocessing after a crash mid-batch —
+    // see crawler.rs) just re-fetches and no-ops, nothing breaks.
     if result.rows_affected() > 0 {
         crate::opengraph::spawn_enrichment(
             pool.clone(),
@@ -247,7 +268,11 @@ pub async fn apply_metadata_update(
 /// database-level default either (same reasoning as `App.id`) — `Tag` reuses
 /// the on-chain `tag_id` directly, `AppTag` uses a deterministic
 /// `"{appId}_{tagId}"` so re-processing the same instruction stays a no-op
-/// via `ON CONFLICT` rather than needing a prior lookup.
+/// via `ON CONFLICT` rather than needing a prior lookup. The `Tag` insert's
+/// `ON CONFLICT DO UPDATE` (not `DO NOTHING`) exists for the same reason as
+/// `sync_app_from_init`'s above: `reconcile.rs` can seed a placeholder `Tag`
+/// row (`name = id`) before the crawler replays this instruction, and this
+/// is the only path that ever writes the real slug/name.
 pub async fn sync_tag_from_suggest(
     pool: &PgPool,
     decoded: &SuggestTag,
@@ -266,7 +291,7 @@ pub async fn sync_tag_from_suggest(
         r#"
         INSERT INTO "Tag" (id, slug, name, "createdAt")
         VALUES ($1, $2, $3, now())
-        ON CONFLICT (id) DO NOTHING
+        ON CONFLICT (id) DO UPDATE SET slug = EXCLUDED.slug, name = EXCLUDED.name
         "#,
     )
     .bind(&decoded.tag_id)
