@@ -315,11 +315,13 @@ confirm.
 
 ### 5b. Set the cluster-specific env vars
 
-`render.yaml` as checked in defaults every Solana-related var to **devnet**.
-For a devnet deployment these need no changes. For **mainnet**, update these
-in the Render dashboard — they're not meant to be edited in `render.yaml` and
-committed, since some are per-deployment secrets. Four of them
-(`NEXT_PUBLIC_SOLANA_RPC`, `NEXT_PUBLIC_SOLANA_CLUSTER`,
+`render.yaml` as checked in defaults every Solana-related var to **devnet**,
+with one exception (see the `nebulous-world-indexer`'s
+`NEXT_PUBLIC_SOLANA_RPC` row below — **required on first deploy, devnet
+included**, not just for mainnet). For everything else, a devnet deployment
+needs no changes; for **mainnet**, update these in the Render dashboard —
+they're not meant to be edited in `render.yaml` and committed, since some are
+per-deployment secrets. Three of them (`NEXT_PUBLIC_SOLANA_CLUSTER`,
 `NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID`, `NEXT_PUBLIC_VOTE_TOKEN_MINT`) live
 in the `solana-shared-config` env var group (Dashboard → **Env Groups** →
 `solana-shared-config`) rather than on either service directly — editing the
@@ -329,13 +331,23 @@ they can't drift out of sync with each other. The rest are per-service
 
 | Var | Where | Devnet value (in `render.yaml`) | Mainnet value |
 | --- | --- | --- | --- |
-| `NEXT_PUBLIC_SOLANA_RPC` | `solana-shared-config` group | `https://api.devnet.solana.com` | your paid RPC's HTTPS URL |
+| `NEXT_PUBLIC_SOLANA_RPC` | `nebulous-world` service | `https://api.devnet.solana.com` | your paid RPC's HTTPS URL |
+| `NEXT_PUBLIC_SOLANA_RPC` | `nebulous-world-indexer` service | **unset (`sync: false`) — must be set by hand even on devnet**, e.g. `https://api.devnet.solana.com`; there's no baked-in default because the indexer takes real, sustained load (backfill + streaming) that the free public endpoint can't reliably handle | your paid RPC's HTTPS URL |
 | `NEXT_PUBLIC_SOLANA_CLUSTER` | `solana-shared-config` group | `devnet` | `mainnet-beta` |
 | `NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID` | `solana-shared-config` group | devnet program id | mainnet program id from phase 1 |
 | `NEXT_PUBLIC_VOTE_TOKEN_MINT` | `solana-shared-config` group | unset (`sync: false`) | NEB mint from phase 2 |
 | `NEXT_PUBLIC_TREASURY_ADDRESS` | `nebulous-world` service | unset | a wallet you control (ideally a multisig) — also the x402 `payTo` for `/api/data/*` |
 | `NEXT_PUBLIC_NEB_DLMM_POOL` | `nebulous-world-indexer` service | unset | DLMM pool address from phase 2 |
 | `RPC_WS_URL` | `nebulous-world-indexer` service | unset (derived from the RPC URL) | only set this if your paid RPC's WebSocket endpoint uses a different host/port than the HTTPS one — see `indexer/src/config.rs`'s `default_ws_url` |
+
+`NEXT_PUBLIC_SOLANA_RPC` is deliberately **not** in `solana-shared-config`
+despite the name overlap with the other three: the app's copy is cosmetic
+(only tells the connected wallet extension which chain it's on — the app has
+no RPC connection of its own, everything on-chain goes through the indexer),
+while the indexer's copy is its actual, load-bearing RPC connection. Forcing
+them to the same value would mean either pointing the wallet UI at a paid RPC
+it doesn't need, or running the indexer against a public endpoint it can't
+reliably sustain.
 
 Everything else in `render.yaml` (build/start commands, service topology,
 the Postgres instance, `TRACKING_SECRET` auto-generation, plan/region) is

@@ -8,13 +8,10 @@ envVarGroups:
   # on-chain or simulation mode.
   - name: solana-shared-config
     envVars:
-      # The app only uses this to tell the connected wallet extension which
-      # chain it's operating on (see SolanaProvider.tsx) — it has no RPC
-      # connection of its own, every on-chain read/write goes through the
-      # indexer instead. The indexer uses it as its actual Solana RPC
-      # endpoint.
-      - key: NEXT_PUBLIC_SOLANA_RPC
-        value: https://api.devnet.solana.com
+      # Deliberately NOT NEXT_PUBLIC_SOLANA_RPC — despite the name overlap,
+      # the app and indexer use it for two unrelated purposes that
+      # shouldn't be forced to the same value. See each service's own
+      # NEXT_PUBLIC_SOLANA_RPC entry below.
       - key: NEXT_PUBLIC_SOLANA_CLUSTER
         value: devnet
       - key: NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID
@@ -66,6 +63,14 @@ services:
         value: production
 
       # --- Solana & indexer (see envVarGroups at the top of this file) ---
+      # Only used to tell the connected wallet extension which chain it's
+      # operating on (see SolanaProvider.tsx) — the app has no RPC
+      # connection of its own, every on-chain read/write goes through the
+      # indexer instead. Not part of solana-shared-config: this is a
+      # cosmetic display value, unrelated to (and fine to differ from) the
+      # indexer's actual RPC endpoint below.
+      - key: NEXT_PUBLIC_SOLANA_RPC
+        value: https://api.devnet.solana.com
       - fromGroup: solana-shared-config
       - fromGroup: indexer-internal-url
 
@@ -182,6 +187,17 @@ services:
           property: connectionString
 
       # --- Solana (see envVarGroups at the top of this file) ---
+      # The indexer's actual Solana RPC endpoint — the one-shot
+      # getProgramAccounts backfill and the ongoing programSubscribe stream
+      # both hit this directly (see indexer/src/config.rs). sync: false,
+      # not a literal default here: unlike the app's cosmetic
+      # NEXT_PUBLIC_SOLANA_RPC above, this one takes real, sustained load,
+      # and the public devnet endpoint is unreliable for it (see
+      # app/.env.example's comment on the same var) — set to a real/paid
+      # RPC provider per deployment. Falls back to
+      # http://127.0.0.1:8899 (a local solana-test-validator) if left unset.
+      - key: NEXT_PUBLIC_SOLANA_RPC
+        sync: false
       - fromGroup: solana-shared-config
 
       # NEB/USDC Meteora DLMM pool address — created by
