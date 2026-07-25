@@ -1,16 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useAuth } from "@/components/providers/AuthProvider";
 import { useToast } from "@/components/ui/Toaster";
 import { useNebDlmmSwap } from "@/hooks/useNebDlmmSwap";
 import { useWalletBalances } from "@/hooks/useWalletBalances";
+import { usePollingEffect } from "@/hooks/usePollingEffect";
 import { TOKEN_SYMBOL } from "@/lib/constants";
 import { formatToken, splitValueUnit } from "@/lib/utils";
 import type { NebPoolStatus } from "@/lib/indexerClient";
 import { ConnectButton } from "@/components/ConnectButton";
 
 const PRESETS = [10, 50, 100, 500];
+// Price-sensitive — polls tighter than most other amounts in the app so a
+// quote shown here doesn't drift far from what a submitted swap will settle at.
+const POOL_POLL_MS = 6000;
 
 /** Same label/value typography as MetricTrendCard's tile header (see
     components/explore/MetricTrendCard.tsx) — "resembles platform activity
@@ -46,9 +50,13 @@ export function BuyPanel() {
     setPool(json.ok ? json.data.pool : null);
   }
 
-  useEffect(() => {
-    refresh().catch(() => setPool(null));
-  }, []);
+  usePollingEffect(
+    () => {
+      refresh().catch(() => setPool(null));
+    },
+    [],
+    POOL_POLL_MS,
+  );
 
   const quote = useMemo(() => {
     if (!pool || usdcAmount <= 0) return null;

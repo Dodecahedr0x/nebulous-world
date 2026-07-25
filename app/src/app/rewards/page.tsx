@@ -8,6 +8,7 @@ import {
 import { TOKEN_NAME, TOKEN_SYMBOL, SITE_URL } from "@/lib/constants";
 import { config } from "@/lib/config";
 import { BuyPanel } from "@/components/token/BuyPanel";
+import { AutoRefresh } from "@/components/AutoRefresh";
 import { PlatformMetrics } from "@/components/rewards/PlatformMetrics";
 import { ClaimRewards } from "@/components/rewards/ClaimRewards";
 import { CloseZeroStakeAccounts } from "@/components/rewards/CloseZeroStakeAccounts";
@@ -54,6 +55,7 @@ export default async function RewardsPage() {
 
   return (
     <div className="space-y-6">
+      <AutoRefresh />
       <PageHeader
         title="Rewards"
         description={

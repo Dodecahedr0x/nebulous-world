@@ -6,6 +6,7 @@ import { formatToken, formatNumber } from "@/lib/utils";
 import { TOKEN_SYMBOL, SITE_URL, SITE_NAME } from "@/lib/constants";
 import { AppCard } from "@/components/AppCard";
 import { JsonLd } from "@/components/JsonLd";
+import { AutoRefresh } from "@/components/AutoRefresh";
 
 export const dynamic = "force-dynamic";
 
@@ -80,6 +81,7 @@ export default async function TagPage({ params }: Props) {
 
   return (
     <div className="space-y-6">
+      <AutoRefresh />
       <JsonLd data={breadcrumbLd} />
       <JsonLd data={listLd} />
 

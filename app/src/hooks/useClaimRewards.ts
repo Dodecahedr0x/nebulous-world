@@ -49,10 +49,10 @@ export function useClaimRewards() {
       const unsigned = transactions.map((t) => Transaction.from(Buffer.from(t, "base64")));
       const signed = await wallet.signAllTransactions(unsigned);
 
-      const txSigs: string[] = [];
-      for (const tx of signed) {
-        txSigs.push(await submitSigned(tx));
-      }
+      // Each packed transaction claims a distinct position (its own PDA), so
+      // they have no ordering dependency on one another — submit and confirm
+      // them concurrently instead of paying N sequential confirm-waits.
+      const txSigs = await Promise.all(signed.map((tx) => submitSigned(tx)));
       return { txSigs, simulated: false };
     },
     [wallet],

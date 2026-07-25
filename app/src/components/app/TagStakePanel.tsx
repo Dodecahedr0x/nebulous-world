@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { BN } from "@anchor-lang/core";
@@ -10,6 +10,7 @@ import { useTagStakeProgram } from "@/hooks/useTagStakeProgram";
 import { useCreateAppProgram } from "@/hooks/useCreateAppProgram";
 import { useClaimRewards } from "@/hooks/useClaimRewards";
 import { useMountTransition } from "@/hooks/useMountTransition";
+import { usePollingEffect } from "@/hooks/usePollingEffect";
 import { cn, formatToken, slugify } from "@/lib/utils";
 import { TOKEN_SYMBOL } from "@/lib/constants";
 import { isSimulationMode } from "@/lib/config";
@@ -20,6 +21,9 @@ import { apiGet } from "@/lib/txClient";
 import type { AppAccountData, PositionData } from "@/lib/indexerClient";
 import { UnstakeFeeNotice } from "@/components/UnstakeFeeNotice";
 import type { TagDTO } from "@/lib/types";
+
+const STAKE_POLL_MS = 8000;
+const PENDING_POLL_MS = 6000;
 
 /**
  * Tags + staking. Shows each tag with its total stake, lets signed-in users
@@ -62,34 +66,37 @@ export function TagStakePanel({
   // path as the rewards page's ClaimRewards, surfaced here too.
   const [pendingByTag, setPendingByTag] = useState<Record<string, number>>({});
 
-  useEffect(() => {
-    if (!user) {
-      setMyStakes({});
-      return;
-    }
-    fetch(`/api/stake?appId=${appId}`)
-      .then((res) => res.json())
-      .then((json) => {
-        if (!json.ok) return;
-        const byTag: Record<string, { id: string; amount: number }> = {};
-        for (const s of json.data.stakes as { id: string; amount: number; appTagId: string }[]) {
-          byTag[s.appTagId] = { id: s.id, amount: s.amount };
-        }
-        setMyStakes(byTag);
-      })
-      .catch(() => {});
-  }, [appId, user]);
+  usePollingEffect(
+    (isCancelled) => {
+      if (!user) {
+        setMyStakes({});
+        return;
+      }
+      fetch(`/api/stake?appId=${appId}`)
+        .then((res) => res.json())
+        .then((json) => {
+          if (isCancelled() || !json.ok) return;
+          const byTag: Record<string, { id: string; amount: number }> = {};
+          for (const s of json.data.stakes as { id: string; amount: number; appTagId: string }[]) {
+            byTag[s.appTagId] = { id: s.id, amount: s.amount };
+          }
+          setMyStakes(byTag);
+        })
+        .catch(() => {});
+    },
+    [appId, user],
+    STAKE_POLL_MS,
+  );
 
-  useEffect(() => {
-    const tagIds = Object.keys(myStakes);
-    if (!user || tagIds.length === 0) {
-      setStakedAtByTag({});
-      setPendingByTag({});
-      return;
-    }
-    let cancelled = false;
+  usePollingEffect(
+    async (isCancelled) => {
+      const tagIds = Object.keys(myStakes);
+      if (!user || tagIds.length === 0) {
+        setStakedAtByTag({});
+        setPendingByTag({});
+        return;
+      }
 
-    async function load() {
       // One shared app-level fetch (tagsAccRewardPerShare) rather than one
       // per tag — every tag's pending reward is computed against the same
       // accumulator, just combined with that tag's own position amount/
@@ -110,7 +117,7 @@ export function TagStakePanel({
           if (!tag) return null;
           try {
             const res = await fetch(
-              `/api/accounts/stake-position/${appId}/${tag.slug}?owner=${user!.wallet}`,
+              `/api/accounts/stake-position/${appId}/${tag.slug}?owner=${user.wallet}`,
             );
             const json = await res.json();
             const position: PositionData | null = json.ok ? json.data.position : null;
@@ -126,7 +133,7 @@ export function TagStakePanel({
           }
         }),
       );
-      if (cancelled) return;
+      if (isCancelled()) return;
       const stakedAtMap: Record<string, number> = {};
       const pendingMap: Record<string, number> = {};
       for (const entry of entries) {
@@ -137,13 +144,10 @@ export function TagStakePanel({
       }
       setStakedAtByTag(stakedAtMap);
       setPendingByTag(pendingMap);
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [appId, user, myStakes, tags]);
+    },
+    [appId, user, myStakes, tags],
+    PENDING_POLL_MS,
+  );
 
   async function claimTag(tagId: string, tagSlug: string) {
     setBusy(true);

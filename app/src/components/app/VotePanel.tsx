@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { BN } from "@anchor-lang/core";
 import { useAuth } from "@/components/providers/AuthProvider";
 import { useToast } from "@/components/ui/Toaster";
 import { useVoteProgram } from "@/hooks/useVoteProgram";
 import { useClaimRewards } from "@/hooks/useClaimRewards";
+import { usePollingEffect } from "@/hooks/usePollingEffect";
 import { isSimulationMode } from "@/lib/config";
 import { TOKEN_SYMBOL } from "@/lib/constants";
 import { formatToken } from "@/lib/utils";
@@ -19,6 +20,10 @@ import { ConnectButton } from "@/components/ConnectButton";
 import { UnstakeFeeNotice } from "@/components/UnstakeFeeNotice";
 
 const PRESETS = [10, 50, 100, 500];
+// Pending reward is the number a user is most likely about to act on
+// (claim), so it polls tighter than the vote/position lookups it depends on.
+const VOTE_POLL_MS = 8000;
+const PENDING_POLL_MS = 6000;
 
 /**
  * The vote widget. Commits vote-tokens to an app: settles an on-chain transfer
@@ -44,36 +49,40 @@ export function VotePanel({ appId }: { appId: string }) {
   // this app's page to claim what its own vote has earned.
   const [pending, setPending] = useState<number | null>(null);
 
-  useEffect(() => {
-    if (!user) {
-      setMyVote(null);
-      return;
-    }
-    fetch(`/api/vote?appId=${appId}`)
-      .then((res) => res.json())
-      .then((json) => setMyVote(json.ok ? json.data.vote : null))
-      .catch(() => {});
-  }, [appId, user]);
+  usePollingEffect(
+    (isCancelled) => {
+      if (!user) {
+        setMyVote(null);
+        return;
+      }
+      fetch(`/api/vote?appId=${appId}`)
+        .then((res) => res.json())
+        .then((json) => {
+          if (!isCancelled()) setMyVote(json.ok ? json.data.vote : null);
+        })
+        .catch(() => {});
+    },
+    [appId, user],
+    VOTE_POLL_MS,
+  );
 
-  useEffect(() => {
-    if (!user || !myVote) {
-      setStakedAt(null);
-      setPending(null);
-      return;
-    }
-    let cancelled = false;
-
-    async function load() {
+  usePollingEffect(
+    async (isCancelled) => {
+      if (!user || !myVote) {
+        setStakedAt(null);
+        setPending(null);
+        return;
+      }
       let position: PositionData | null = null;
       try {
         const res = await apiGet<{ position: PositionData | null }>(
-          `/api/accounts/vote-position/${appId}?owner=${user!.wallet}`,
+          `/api/accounts/vote-position/${appId}?owner=${user.wallet}`,
         );
         position = res.position;
       } catch {
         position = null;
       }
-      if (cancelled) return;
+      if (isCancelled()) return;
       setStakedAt(position?.stakedAt ?? null);
 
       if (!position || isSimulationMode()) {
@@ -82,7 +91,7 @@ export function VotePanel({ appId }: { appId: string }) {
       }
       try {
         const { app } = await apiGet<{ app: AppAccountData | null }>(`/api/accounts/app/${appId}`);
-        if (cancelled) return;
+        if (isCancelled()) return;
         setPending(
           app
             ? fromRawAmount(
@@ -91,15 +100,12 @@ export function VotePanel({ appId }: { appId: string }) {
             : null,
         );
       } catch {
-        if (!cancelled) setPending(null);
+        if (!isCancelled()) setPending(null);
       }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [appId, user, myVote]);
+    },
+    [appId, user, myVote],
+    PENDING_POLL_MS,
+  );
 
   const unstakeFee = myVote && stakedAt !== null ? estimateUnstakeFee(myVote.amount, stakedAt) : null;
 

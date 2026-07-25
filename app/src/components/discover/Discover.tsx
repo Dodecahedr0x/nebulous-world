@@ -22,6 +22,10 @@ interface Props {
 }
 
 const RANGE_KEYS = Object.keys(EMPTY_RANGE_FILTERS) as (keyof RangeFilters)[];
+// Keeps page 1's amounts (rank/stake/views) live while the user is at rest
+// on it. Paused once they've scrolled into page 2+ (see the effect below) so
+// a background refresh never clobbers infinite-scroll-loaded results.
+const DISCOVER_POLL_MS = 15000;
 
 /**
  * The Discover experience: a search box, a floating filter panel, a sort
@@ -113,25 +117,51 @@ export function Discover({ initial }: Props) {
     [buildParams, router],
   );
 
+  // Latest `loadedPage` for the background poll below to read without
+  // needing to be an effect dependency (a value it must react to without
+  // tearing down/restarting its interval every time the user scrolls).
+  const loadedPageRef = useRef(loadedPage);
+  loadedPageRef.current = loadedPage;
+
   // Refetch page 1 whenever the URL's filters/sort change — replaces
   // whatever infinite-scroll pages had accumulated so far with a fresh set.
+  // Also keeps re-fetching it on an interval afterwards (silently — no
+  // `loading` toggle — while the user is still on page 1) so grid amounts
+  // don't go stale for someone who lands here and doesn't scroll.
   useEffect(() => {
     let cancelled = false;
+
+    function fetchPage1() {
+      return fetch(`/api/apps?${params.toString()}`, { cache: "no-store" })
+        .then((r) => r.json())
+        .then((json) => {
+          if (cancelled || !json.ok) return;
+          setApps(json.data.apps);
+          setTotal(json.data.total);
+          setFacets(json.data.facets);
+          setLoadedPage(1);
+        });
+    }
+
     setLoading(true);
-    fetch(`/api/apps?${params.toString()}`, { cache: "no-store" })
-      .then((r) => r.json())
-      .then((json) => {
-        if (cancelled || !json.ok) return;
-        setApps(json.data.apps);
-        setTotal(json.data.total);
-        setFacets(json.data.facets);
-        setLoadedPage(1);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    fetchPage1().finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+
+    function pollIfAtRest() {
+      if (document.visibilityState === "visible" && loadedPageRef.current === 1) {
+        fetchPage1().catch(() => {});
+      }
+    }
+    const interval = setInterval(pollIfAtRest, DISCOVER_POLL_MS);
+    document.addEventListener("visibilitychange", pollIfAtRest);
+    window.addEventListener("focus", pollIfAtRest);
+
     return () => {
       cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", pollIfAtRest);
+      window.removeEventListener("focus", pollIfAtRest);
     };
   }, [params, refreshKey]);
 

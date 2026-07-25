@@ -1,12 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useAuth } from "@/components/providers/AuthProvider";
 import { ConnectButton } from "@/components/ConnectButton";
 import { XpLeaderboard } from "@/components/profile/XpLeaderboard";
+import { usePollingEffect } from "@/hooks/usePollingEffect";
 import { timeAgo } from "@/lib/utils";
 import type { UserXp, XpActivityEntry, XpTaskKind } from "@/lib/indexerClient";
+
+const XP_POLL_MS = 15000;
 
 // Kept in sync by hand with the XP_* consts in indexer/src/handlers/xp.rs —
 // this is presentation only (label/href), the point values here are for
@@ -40,35 +43,32 @@ export function XpProgress() {
   const [xp, setXp] = useState<UserXp | null | undefined>(undefined);
   const [activity, setActivity] = useState<XpActivityEntry[] | null>(null);
 
-  useEffect(() => {
-    if (!user) {
-      setXp(null);
-      setActivity(null);
-      return;
-    }
-
-    let cancelled = false;
-
-    async function load() {
-      const [xpRes, activityRes] = await Promise.all([
-        fetch("/api/xp/me").then((r) => r.json()),
-        fetch("/api/xp/me/activity").then((r) => r.json()),
-      ]);
-      if (cancelled) return;
-      if (xpRes.ok) setXp(xpRes.data);
-      if (activityRes.ok) setActivity(activityRes.data);
-    }
-
-    load().catch(() => {
-      if (!cancelled) {
+  usePollingEffect(
+    async (isCancelled) => {
+      if (!user) {
         setXp(null);
-        setActivity([]);
+        setActivity(null);
+        return;
       }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [user]);
+
+      try {
+        const [xpRes, activityRes] = await Promise.all([
+          fetch("/api/xp/me").then((r) => r.json()),
+          fetch("/api/xp/me/activity").then((r) => r.json()),
+        ]);
+        if (isCancelled()) return;
+        if (xpRes.ok) setXp(xpRes.data);
+        if (activityRes.ok) setActivity(activityRes.data);
+      } catch {
+        if (!isCancelled()) {
+          setXp(null);
+          setActivity([]);
+        }
+      }
+    },
+    [user],
+    XP_POLL_MS,
+  );
 
   if (authLoading) {
     return (

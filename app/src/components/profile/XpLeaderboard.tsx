@@ -1,8 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { shortAddress } from "@/lib/utils";
+import { useLiveQuery } from "@/hooks/useLiveQuery";
 import type { XpLeaderboardEntry } from "@/lib/indexerClient";
+
+const LEADERBOARD_POLL_MS = 20000;
+
+async function fetchLeaderboard(): Promise<XpLeaderboardEntry[]> {
+  try {
+    const res = await fetch("/api/xp/leaderboard");
+    const json = await res.json();
+    return json.ok ? json.data : [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Top 10 wallets by lifetime XP — a public, cosmetic ranking (never derived
@@ -11,22 +23,7 @@ import type { XpLeaderboardEntry } from "@/lib/indexerClient";
  * personally and how that compares platform-wide.
  */
 export function XpLeaderboard({ currentUserId }: { currentUserId?: string }) {
-  const [entries, setEntries] = useState<XpLeaderboardEntry[] | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/xp/leaderboard")
-      .then((r) => r.json())
-      .then((json) => {
-        if (!cancelled) setEntries(json.ok ? json.data : []);
-      })
-      .catch(() => {
-        if (!cancelled) setEntries([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { data: entries } = useLiveQuery(fetchLeaderboard, [], { intervalMs: LEADERBOARD_POLL_MS });
 
   return (
     <section className="card space-y-3 p-6">

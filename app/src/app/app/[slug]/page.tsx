@@ -11,6 +11,7 @@ import { TrafficBeacon } from "@/components/app/TrafficBeacon";
 import { AdSlot } from "@/components/ads/AdSlot";
 import { AppMetricsPanel } from "@/components/app/AppMetricsPanel";
 import { JsonLd } from "@/components/JsonLd";
+import { AutoRefresh } from "@/components/AutoRefresh";
 
 export const dynamic = "force-dynamic";
 
@@ -97,6 +98,7 @@ export default async function AppDetailPage({ params }: Props) {
 
   return (
     <div className="space-y-6">
+      <AutoRefresh />
       <JsonLd data={appLd} />
       <JsonLd data={breadcrumbLd} />
       {/* Records a page view for traffic analytics & revenue attribution. */}

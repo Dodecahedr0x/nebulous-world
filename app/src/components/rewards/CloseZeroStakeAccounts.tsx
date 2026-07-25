@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { useToast } from "@/components/ui/Toaster";
 import { useClosePositions } from "@/hooks/useClosePositions";
+import { useLiveQuery } from "@/hooks/useLiveQuery";
 import { isSimulationMode } from "@/lib/config";
 import { formatToken } from "@/lib/utils";
 import { apiGet } from "@/lib/txClient";
 import type { CloseablePosition } from "@/lib/indexerClient";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
+const CLOSEABLE_POLL_MS = 15000;
 
 /**
  * A fully-withdrawn `VotePosition`/`StakePosition` still sits on-chain
@@ -24,28 +26,23 @@ export function CloseZeroStakeAccounts() {
   const toast = useToast();
   const { closeVotePosition, closeTagStakePosition } = useClosePositions();
 
-  const [positions, setPositions] = useState<CloseablePosition[] | null>(null);
   const [closing, setClosing] = useState(false);
+  const owner = wallet.publicKey?.toBase58() ?? null;
 
-  useEffect(() => {
-    if (isSimulationMode() || !wallet.publicKey) {
-      setPositions(null);
-      return;
-    }
-    let cancelled = false;
-    apiGet<{ positions: CloseablePosition[] }>(
-      `/api/wallet/${wallet.publicKey.toBase58()}/closeable-positions`,
-    )
-      .then(({ positions }) => {
-        if (!cancelled) setPositions(positions);
-      })
-      .catch(() => {
-        if (!cancelled) setPositions([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [wallet.publicKey]);
+  const { data: positions, refresh: refreshPositions } = useLiveQuery(
+    async () => {
+      try {
+        const { positions } = await apiGet<{ positions: CloseablePosition[] }>(
+          `/api/wallet/${owner}/closeable-positions`,
+        );
+        return positions;
+      } catch {
+        return [];
+      }
+    },
+    [owner],
+    { enabled: !isSimulationMode() && !!owner, intervalMs: CLOSEABLE_POLL_MS },
+  );
 
   if (!positions || positions.length === 0) return null;
 
@@ -82,13 +79,7 @@ export function CloseZeroStakeAccounts() {
     // Re-fetch rather than assume every close succeeded (a wallet rejection
     // mid-batch leaves some positions still open) — the component just
     // disappears on its own once the list comes back empty.
-    if (wallet.publicKey) {
-      apiGet<{ positions: CloseablePosition[] }>(
-        `/api/wallet/${wallet.publicKey.toBase58()}/closeable-positions`,
-      )
-        .then(({ positions }) => setPositions(positions))
-        .catch(() => {});
-    }
+    refreshPositions();
   }
 
   return (

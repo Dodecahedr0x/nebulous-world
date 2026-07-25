@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { BN } from "@anchor-lang/core";
 import { useAuth } from "@/components/providers/AuthProvider";
 import { useToast } from "@/components/ui/Toaster";
 import { useClaimRewards } from "@/hooks/useClaimRewards";
+import { usePollingEffect } from "@/hooks/usePollingEffect";
 import { ConnectButton } from "@/components/ConnectButton";
 import { isSimulationMode } from "@/lib/config";
 import { TOKEN_SYMBOL } from "@/lib/constants";
@@ -44,6 +45,8 @@ interface ClaimRow {
   pending: number | null; // null while loading or unavailable
 }
 
+const CLAIM_POLL_MS = 6000;
+
 /**
  * "Your rewards" — every app/tag whose vote or tag stake has actually
  * accrued a claimable NEB reward right now, nothing else. This used to also
@@ -62,18 +65,22 @@ export function ClaimRewards() {
   const [claimingKey, setClaimingKey] = useState<string | null>(null);
   const [claimingAll, setClaimingAll] = useState(false);
 
-  useEffect(() => {
-    if (!user || isSimulationMode() || !wallet.publicKey) {
-      setRows(null);
-      return;
-    }
+  usePollingEffect(
+    async (isCancelled) => {
+      if (!user || isSimulationMode() || !wallet.publicKey) {
+        setRows(null);
+        return;
+      }
 
-    let cancelled = false;
-
-    async function load() {
-      const res = await fetch("/api/rewards/positions");
-      const json = await res.json();
-      if (cancelled || !json.ok) return;
+      let json: { ok: boolean; data?: { votes: VotePositionDTO[]; stakes: StakePositionDTO[] } };
+      try {
+        const res = await fetch("/api/rewards/positions");
+        json = await res.json();
+      } catch {
+        if (!isCancelled()) setRows([]);
+        return;
+      }
+      if (isCancelled() || !json.ok || !json.data) return;
 
       const votes: VotePositionDTO[] = json.data.votes;
       const stakes: StakePositionDTO[] = json.data.stakes;
@@ -137,15 +144,11 @@ export function ClaimRewards() {
           }
         }),
       );
-      if (!cancelled) setRows(withPending.filter((r) => r.pending != null && r.pending > 0));
-    }
-
-    load().catch(() => setRows([]));
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, wallet.publicKey]);
+      if (!isCancelled()) setRows(withPending.filter((r) => r.pending != null && r.pending > 0));
+    },
+    [user, wallet.publicKey],
+    CLAIM_POLL_MS,
+  );
 
   async function claim(row: ClaimRow) {
     setClaimingKey(row.key);

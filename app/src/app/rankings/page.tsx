@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import type { Metadata } from "next";
 import { SITE_URL } from "@/lib/constants";
 import { PageHeader } from "@/components/PageHeader";
+import { AutoRefresh } from "@/components/AutoRefresh";
 import { PlatformMetrics } from "@/components/rewards/PlatformMetrics";
 import { Leaderboard } from "@/components/rankings/Leaderboard";
 import { RankingsTabs } from "@/components/rankings/RankingsTabs";
@@ -53,6 +54,7 @@ export default async function RankingsPage() {
 
   return (
     <div className="space-y-6">
+      <AutoRefresh />
       <PageHeader
         title="Rankings"
         description="A live leaderboard of every app on nebulous.world, plus a map of how apps and tags connect."

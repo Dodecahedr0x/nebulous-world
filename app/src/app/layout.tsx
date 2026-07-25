@@ -79,8 +79,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={bodySans.variable}>
-      <body className="bg-cream font-sans text-ink antialiased">
+      <head>
         <AdSenseScript />
+      </head>
+      <body className="bg-cream font-sans text-ink antialiased">
         <JsonLd data={siteLd} />
         <JsonLd data={orgLd} />
         <SolanaProvider>

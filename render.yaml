@@ -33,7 +33,7 @@ services:
       - key: NEXT_PUBLIC_SOLANA_CLUSTER
         value: devnet
       - key: NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID
-        value: EkQRRgRFd2FUedJnPVs2Xs6N7U2Jef5GrfwJ62UJZUXx
+        value: 7AAwB8aHgmuz9yzYdo6gKjZRx5KkjePYHyuJEmrcRXgX
       - key: NEXT_PUBLIC_VOTE_TOKEN_DECIMALS
         value: "6"
       # Leave unset to run in off-chain "simulation" mode. Fill in once a

@@ -20,6 +20,7 @@ use config::Config;
 use processors::account::AccountProcessor;
 use solana_account_decoder_client_types::UiAccountEncoding;
 use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
+use solana_commitment_config::CommitmentConfig;
 use std::sync::Arc;
 
 /// Indexes the nebulous_world Anchor program with Carbon
@@ -97,7 +98,14 @@ async fn main() -> Result<()> {
 
     let api_state = Arc::new(api::ApiState {
         pool: pool.clone(),
-        rpc: solana_client::nonblocking::rpc_client::RpcClient::new(config.rpc_http_url.clone()),
+        // `confirmed` (not the client default of `finalized`) — `submit_tx`'s
+        // send_and_confirm_transaction polls at this commitment, and waiting
+        // for full finalization (32+ confirmations, ~13-30s+) before
+        // responding to the client is what was making tx submission feel slow.
+        rpc: solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
+            config.rpc_http_url.clone(),
+            CommitmentConfig::confirmed(),
+        ),
         http: http_client,
         program_id: config.program_id,
         vote_token_mint: config.vote_token_mint.unwrap_or_default(),

@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { BN } from "@anchor-lang/core";
 import { useAuth } from "@/components/providers/AuthProvider";
@@ -11,6 +11,7 @@ import { useVoteProgram } from "@/hooks/useVoteProgram";
 import { useTagStakeProgram } from "@/hooks/useTagStakeProgram";
 import { useClaimRewards } from "@/hooks/useClaimRewards";
 import { useMountTransition } from "@/hooks/useMountTransition";
+import { usePollingEffect } from "@/hooks/usePollingEffect";
 import { ConnectButton } from "@/components/ConnectButton";
 import { isSimulationMode } from "@/lib/config";
 import { TOKEN_SYMBOL } from "@/lib/constants";
@@ -62,6 +63,8 @@ interface StakeRow {
   pending: number | null;
 }
 
+const STAKES_POLL_MS = 6000;
+
 interface AppGroup {
   appId: string;
   appSlug: string;
@@ -100,18 +103,22 @@ export function MyStakes() {
   const { rendered: unstakeRendered, visible: unstakeVisible } = useMountTransition(openUnstakeKey, 200);
   const [unstakeAmount, setUnstakeAmount] = useState(0);
 
-  useEffect(() => {
-    if (!user) {
-      setRows(null);
-      return;
-    }
+  usePollingEffect(
+    async (isCancelled) => {
+      if (!user) {
+        setRows(null);
+        return;
+      }
 
-    let cancelled = false;
-
-    async function load() {
-      const res = await fetch("/api/rewards/positions");
-      const json = await res.json();
-      if (cancelled || !json.ok) return;
+      let json: { ok: boolean; data?: { votes: VotePositionDTO[]; stakes: StakePositionDTO[] } };
+      try {
+        const res = await fetch("/api/rewards/positions");
+        json = await res.json();
+      } catch {
+        if (!isCancelled()) setRows([]);
+        return;
+      }
+      if (isCancelled() || !json.ok || !json.data) return;
 
       const votes: VotePositionDTO[] = json.data.votes;
       const stakes: StakePositionDTO[] = json.data.stakes;
@@ -176,15 +183,11 @@ export function MyStakes() {
           }
         }),
       );
-      if (!cancelled) setRows(withDetail);
-    }
-
-    load().catch(() => setRows([]));
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, wallet.publicKey]);
+      if (!isCancelled()) setRows(withDetail);
+    },
+    [user, wallet.publicKey],
+    STAKES_POLL_MS,
+  );
 
   const walletReady = isSimulationMode() || !!wallet.publicKey;
 
