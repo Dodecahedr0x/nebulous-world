@@ -7,8 +7,8 @@ import Script from "next/script";
  * source `scripts/settleEpoch.ts`/`src/lib/adsense.ts` pull real earnings
  * from. Distinct from, and unrelated to, `components/ads/AdSlot.tsx`/
  * `AdCard.tsx`: those render this platform's own internal "sponsored app"
- * marketplace (self-serve, simulated CPM via `AD_CPM`) — not a Google ad
- * unit — and their revenue never touches AdSense. Before this component
+ * marketplace (self-serve, simulated per-ad `cpm` DB column) — not a Google
+ * ad unit — and their revenue never touches AdSense. Before this component
  * existed, nothing in the app ever loaded adsbygoogle.js, so no real
  * AdSense ad could ever render regardless of how the account/settlement
  * pipeline was configured.
