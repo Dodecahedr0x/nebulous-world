@@ -50,6 +50,32 @@ const USER_AGENTS = [
 // Keep in sync with indexer/src/opengraph.rs's WELL_KNOWN_ICON_PATHS.
 const WELL_KNOWN_ICON_PATHS = ["/apple-touch-icon.png", "/favicon.ico"] as const;
 
+// Absolute last resort, once even WELL_KNOWN_ICON_PATHS has failed: a public
+// favicon service that already has the icon cached, keyed by host. This is the
+// only thing that reaches the handful of sites which 403 both their homepage
+// *and* their own static assets (midjourney.com, epicgames.com,
+// heritageauctions.com, arkhamintelligence.com).
+//
+// Two consequences worth being deliberate about, since the resolved URL is
+// stored on the App row and then served to every visitor:
+//
+//  - It is a hotlink. Each card view hits DuckDuckGo, so those viewers' IPs are
+//    visible to them. DuckDuckGo rather than Google's s2/favicons specifically
+//    to keep that exposure as small as possible — same coverage on all four
+//    sites above, no query string, no ad-network operator. Dropping this
+//    fallback is a one-line change if that trade isn't wanted; the affected
+//    apps simply go back to having no icon.
+//  - Icons here are small (~32x32), so this is genuinely worse than every
+//    source above it — hence last.
+//
+// Safe against false positives: the service answers 404 (not a generic globe
+// placeholder) for a host it has nothing for, so the res.ok check in
+// fallbackIcon is enough to reject it — verified against a nonsense domain and
+// against onbtc.multisig.us, both of which correctly 404.
+//
+// Keep in sync with indexer/src/opengraph.rs's ICON_SERVICE.
+const ICON_SERVICE = "https://icons.duckduckgo.com/ip3/";
+
 function metaContent(html: string, patterns: RegExp[]): string | undefined {
   for (const pattern of patterns) {
     // Group 1 is the quote character (captured so the content group can stop
@@ -118,27 +144,42 @@ function linkIcon(html: string): string | undefined {
 }
 
 /**
- * Probe WELL_KNOWN_ICON_PATHS against `pageUrl`'s origin, returning the first
- * that answers with an actual image. The content-type check is the load-bearing
- * part: a single-page app typically answers *every* unknown path —
- * /favicon.ico included — with its 200 HTML shell, which would otherwise be
- * stored as an icon URL that renders as a broken image.
+ * Probe WELL_KNOWN_ICON_PATHS against `pageUrl`'s origin and then ICON_SERVICE,
+ * returning the first that answers with an actual image.
+ *
+ * The content-type check is the load-bearing part for the former: a single-page
+ * app typically answers *every* unknown path — /favicon.ico included — with its
+ * 200 HTML shell, which would otherwise be stored as an icon URL that renders
+ * as a broken image.
  */
-async function wellKnownIcon(pageUrl: string): Promise<string | undefined> {
-  for (const path of WELL_KNOWN_ICON_PATHS) {
+async function fallbackIcon(pageUrl: string): Promise<string | undefined> {
+  let host: string;
+  try {
+    host = new URL(pageUrl).host;
+  } catch {
+    return undefined;
+  }
+  const candidates = [
+    ...WELL_KNOWN_ICON_PATHS.map((path) => new URL(path, pageUrl).toString()),
+    `${ICON_SERVICE}${host}.ico`,
+  ];
+
+  for (const candidate of candidates) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
       // GET, not HEAD: plenty of static hosts answer HEAD with 405 while
       // serving the file perfectly well.
-      const res = await fetch(new URL(path, pageUrl), {
+      const res = await fetch(candidate, {
         signal: controller.signal,
         headers: { "user-agent": USER_AGENTS[0] },
         redirect: "follow",
       });
-      if (res.ok && (res.headers.get("content-type") ?? "").startsWith("image/")) return res.url;
+      if (res.ok && (res.headers.get("content-type") ?? "").startsWith("image/")) {
+        return res.url || candidate;
+      }
     } catch {
-      // try the next path
+      // try the next candidate
     } finally {
       clearTimeout(timeout);
     }
@@ -211,19 +252,19 @@ export async function fetchOpenGraph(pageUrl: string): Promise<OpenGraphData | n
   if (!best && !weakIcon) {
     // Every page attempt struck out — the well-known paths need no HTML, so
     // they're the last thing standing for a site that 403s its own homepage.
-    const icon = await wellKnownIcon(pageUrl);
+    const icon = await fallbackIcon(pageUrl);
     if (icon) {
       console.warn(`opengraph: ${pageUrl} served no page (${failures.join("; ")}) — fell back to ${icon}`);
       return { imageUrl: icon };
     }
-    console.warn(`opengraph: no metadata for ${pageUrl} (${failures.join("; ")}; no well-known icon either)`);
+    console.warn(`opengraph: no metadata for ${pageUrl} (${failures.join("; ")}; no fallback icon either)`);
     return null;
   }
 
   const data: OpenGraphData = best ?? {};
   // Fill the icon from the weakest sources only if nothing better turned up —
   // a page can perfectly well have og:title but no og:image.
-  if (!data.imageUrl) data.imageUrl = weakIcon ?? (await wellKnownIcon(pageUrl));
+  if (!data.imageUrl) data.imageUrl = weakIcon ?? (await fallbackIcon(pageUrl));
   return Object.keys(data).length > 0 ? data : null;
 }
 

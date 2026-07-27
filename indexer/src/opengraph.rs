@@ -70,6 +70,32 @@ const DESCRIPTION_MAX: usize = 4000;
 /// Keep in sync with app/src/lib/opengraph.ts's `WELL_KNOWN_ICON_PATHS`.
 const WELL_KNOWN_ICON_PATHS: [&str; 2] = ["/apple-touch-icon.png", "/favicon.ico"];
 
+/// Absolute last resort, once even `WELL_KNOWN_ICON_PATHS` has failed: a
+/// public favicon service that already has the icon cached, keyed by host.
+/// This is the only thing that reaches the handful of sites which 403 both
+/// their homepage *and* their own static assets (midjourney.com,
+/// epicgames.com, heritageauctions.com, arkhamintelligence.com).
+///
+/// Two consequences worth being deliberate about, since the resolved URL is
+/// stored on the App row and then served to every visitor:
+///
+/// - It is a hotlink. Each card view hits DuckDuckGo, so those viewers'
+///   IPs are visible to them. DuckDuckGo rather than Google's `s2/favicons`
+///   specifically to keep that exposure as small as possible — same
+///   coverage on all four sites above, no query string, no ad-network
+///   operator. Dropping this fallback is a one-line change if that trade
+///   isn't wanted; the affected apps simply go back to having no icon.
+/// - Icons here are small (~32x32), so this is genuinely worse than every
+///   source above it — hence last.
+///
+/// Safe against false positives: the service answers 404 (not a generic
+/// globe placeholder) for a host it has nothing for, so the status check in
+/// `fallback_icon` is enough to reject it — verified against a nonsense
+/// domain and against onbtc.multisig.us, both of which correctly 404.
+///
+/// Keep in sync with app/src/lib/opengraph.ts's `ICON_SERVICE`.
+const ICON_SERVICE: &str = "https://icons.duckduckgo.com/ip3/";
+
 /// Everything one page fetch yielded. `link_icon` is kept out of `og` so the
 /// caller can rank it below a real `og:image` from a later attempt rather
 /// than letting whichever User-Agent happened to go first win.
@@ -213,8 +239,9 @@ fn decode_entities(s: &str) -> String {
 /// 2. `<title>` / `<meta name="description">` — a plain page still names
 ///    itself even with no social tags at all.
 /// 3. `<link rel="apple-touch-icon">`, then `<link rel="icon">`.
-/// 4. `WELL_KNOWN_ICON_PATHS`, which need no HTML and so are the only
-///    source that survives a site 403-ing the page fetch outright.
+/// 4. `WELL_KNOWN_ICON_PATHS`, then `ICON_SERVICE` — none of which need
+///    any HTML, and so are the only sources that survive a site 403-ing
+///    the page fetch outright.
 ///
 /// A weaker source is never allowed to displace a stronger one: a `<link>`
 /// icon found under the first UA is held aside and only used if no later
@@ -264,7 +291,7 @@ async fn fetch_open_graph(http: &reqwest::Client, page_url: &str) -> Option<Open
         // `apply_metadata_update` is built to merge in.
         None if weak_icon.is_some() => OpenGraphData::default(),
         None => {
-            let icon = well_known_icon(http, page_url).await;
+            let icon = fallback_icon(http, page_url).await;
             return match icon {
                 Some(url) => {
                     log::info!(
@@ -278,7 +305,7 @@ async fn fetch_open_graph(http: &reqwest::Client, page_url: &str) -> Option<Open
                 }
                 None => {
                     log::info!(
-                        "opengraph: no metadata for {page_url} ({}; no well-known icon either)",
+                        "opengraph: no metadata for {page_url} ({}; no fallback icon either)",
                         failures.join("; ")
                     );
                     None
@@ -292,23 +319,32 @@ async fn fetch_open_graph(http: &reqwest::Client, page_url: &str) -> Option<Open
     if data.image_url.is_none() {
         data.image_url = match weak_icon {
             Some(icon) => Some(icon),
-            None => well_known_icon(http, page_url).await,
+            None => fallback_icon(http, page_url).await,
         };
     }
     Some(data)
 }
 
-/// Probe `WELL_KNOWN_ICON_PATHS` against `page_url`'s origin, returning the
-/// first that answers with an actual image. The content-type check is the
-/// load-bearing part: a single-page app typically answers *every* unknown
-/// path — `/favicon.ico` included — with its 200 HTML shell, which would
-/// otherwise be stored as an icon URL that renders as a broken image.
-async fn well_known_icon(http: &reqwest::Client, page_url: &str) -> Option<String> {
+/// Probe `WELL_KNOWN_ICON_PATHS` against `page_url`'s origin and then
+/// `ICON_SERVICE`, returning the first that answers with an actual image.
+///
+/// The content-type check is the load-bearing part for the former: a
+/// single-page app typically answers *every* unknown path — `/favicon.ico`
+/// included — with its 200 HTML shell, which would otherwise be stored as an
+/// icon URL that renders as a broken image.
+async fn fallback_icon(http: &reqwest::Client, page_url: &str) -> Option<String> {
     let base = reqwest::Url::parse(page_url).ok()?;
-    for path in WELL_KNOWN_ICON_PATHS {
-        let Ok(candidate) = base.join(path) else {
-            continue;
-        };
+    let mut candidates: Vec<reqwest::Url> = WELL_KNOWN_ICON_PATHS
+        .iter()
+        .filter_map(|path| base.join(path).ok())
+        .collect();
+    if let Some(host) = base.host_str() {
+        if let Ok(url) = reqwest::Url::parse(&format!("{ICON_SERVICE}{host}.ico")) {
+            candidates.push(url);
+        }
+    }
+
+    for candidate in candidates {
         // GET, not HEAD: plenty of static hosts answer HEAD with 405 while
         // serving the file perfectly well. The body is never read — these
         // are small, and dropping the response closes the connection.

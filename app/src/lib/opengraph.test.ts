@@ -227,6 +227,38 @@ describe("fetchOpenGraph", () => {
     expect(data).toEqual({ imageUrl: "https://www.stockx.com/apple-touch-icon.png" });
   });
 
+  // The only thing that reaches a site which 403s its homepage *and* its own
+  // static assets.
+  it("falls back to the icon service when even the well-known paths fail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: string | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://icons.duckduckgo.com/")) {
+          return { ok: true, url, headers: new Headers({ "content-type": "image/png" }) } as unknown as Response;
+        }
+        return { ok: false, status: 403, url, headers: new Headers() } as unknown as Response;
+      }),
+    );
+    const data = await fetchOpenGraph("https://midjourney.com");
+    expect(data?.imageUrl).toBe("https://icons.duckduckgo.com/ip3/midjourney.com.ico");
+  });
+
+  // The service 404s hosts it has nothing for, rather than returning a generic
+  // globe — so a miss must stay a miss rather than becoming a placeholder icon.
+  it("returns null when the icon service 404s the host", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        url: "https://icons.duckduckgo.com/ip3/onbtc.multisig.us.ico",
+        headers: new Headers({ "content-type": "image/png" }),
+      } as unknown as Response),
+    );
+    expect(await fetchOpenGraph("https://onbtc.multisig.us")).toBeNull();
+  });
+
   // An SPA typically answers *every* unknown path with its HTML shell, so a
   // 200 alone must never be taken as "this is an icon".
   it("ignores a well-known path that answers with HTML rather than an image", async () => {
