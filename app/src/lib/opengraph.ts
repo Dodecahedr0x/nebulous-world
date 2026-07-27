@@ -38,6 +38,18 @@ const USER_AGENTS = [
   "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
 ] as const;
 
+// Conventional icon locations, tried (in this order — the Apple one is
+// 180x180, the .ico often still 16x16) only after every in-page source has come
+// up empty. Worth the extra request because they need no HTML at all: the ~10
+// sites that hard-403 this fetcher's page requests mostly still serve their
+// static assets to anyone, so this is the only thing that recovers an icon for
+// them. Verified against the live app list: 4 of the 403-ing hosts
+// (etherscan.io, canva.com, solscan.io, stockx.com) hand these over despite
+// refusing their own homepage.
+//
+// Keep in sync with indexer/src/opengraph.rs's WELL_KNOWN_ICON_PATHS.
+const WELL_KNOWN_ICON_PATHS = ["/apple-touch-icon.png", "/favicon.ico"] as const;
+
 function metaContent(html: string, patterns: RegExp[]): string | undefined {
   for (const pattern of patterns) {
     // Group 1 is the quote character (captured so the content group can stop
@@ -62,6 +74,76 @@ function metaPatterns(key: string): RegExp[] {
     new RegExp(`<meta[^>]+(?:property|name)=["']${escaped}["'][^>]*content=(["'])([^>]*?)\\1`, "i"),
     new RegExp(`<meta[^>]+content=(["'])([^>]*?)\\1[^>]*(?:property|name)=["']${escaped}["']`, "i"),
   ];
+}
+
+/**
+ * The page's <title>, used only when no og:title/twitter:title exists. [^<]
+ * rather than a lazy `.` so a page missing its </title> can't run the capture
+ * on into the rest of the document.
+ */
+function titleTag(html: string): string | undefined {
+  const raw = /<title[^>]*>([^<]*)<\/title>/i.exec(html)?.[1]?.trim();
+  return raw ? raw : undefined;
+}
+
+/**
+ * Best <link rel="...icon"> href, preferring apple-touch-icon (usually 180x180)
+ * over a bare icon/shortcut icon (often still a 16x16 .ico).
+ *
+ * Parses each <link> tag whole and reads its attributes, rather than
+ * pattern-matching rel and href in a fixed order the way metaPatterns has to:
+ * rel is a space-separated *list* (rel="shortcut icon"), so matching it as an
+ * opaque string would miss half the web. mask-icon is deliberately excluded —
+ * it's a monochrome SVG silhouette for Safari's pinned tabs and renders as a
+ * black blob anywhere else.
+ */
+function linkIcon(html: string): string | undefined {
+  const attr = (tag: string, name: string) =>
+    new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, "is").exec(tag)?.[1]?.trim();
+
+  let fallback: string | undefined;
+  for (const match of html.matchAll(/<link\s[^>]*>/gis)) {
+    const tag = match[0];
+    const rel = attr(tag, "rel");
+    const href = attr(tag, "href");
+    if (!rel || !href) continue;
+    const rels = rel.split(/\s+/).map((r) => r.toLowerCase());
+    if (rels.includes("mask-icon")) continue;
+    if (rels.includes("apple-touch-icon") || rels.includes("apple-touch-icon-precomposed")) {
+      return href;
+    }
+    if (!fallback && rels.includes("icon")) fallback = href;
+  }
+  return fallback;
+}
+
+/**
+ * Probe WELL_KNOWN_ICON_PATHS against `pageUrl`'s origin, returning the first
+ * that answers with an actual image. The content-type check is the load-bearing
+ * part: a single-page app typically answers *every* unknown path —
+ * /favicon.ico included — with its 200 HTML shell, which would otherwise be
+ * stored as an icon URL that renders as a broken image.
+ */
+async function wellKnownIcon(pageUrl: string): Promise<string | undefined> {
+  for (const path of WELL_KNOWN_ICON_PATHS) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      // GET, not HEAD: plenty of static hosts answer HEAD with 405 while
+      // serving the file perfectly well.
+      const res = await fetch(new URL(path, pageUrl), {
+        signal: controller.signal,
+        headers: { "user-agent": USER_AGENTS[0] },
+        redirect: "follow",
+      });
+      if (res.ok && (res.headers.get("content-type") ?? "").startsWith("image/")) return res.url;
+    } catch {
+      // try the next path
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  return undefined;
 }
 
 function decodeEntities(s: string): string {
@@ -103,17 +185,46 @@ async function readHead(res: Response, maxBytes: number): Promise<string> {
  */
 export async function fetchOpenGraph(pageUrl: string): Promise<OpenGraphData | null> {
   const failures: string[] = [];
+  // Held aside across attempts: a <link> icon is better than nothing but worse
+  // than an og:image a later User-Agent might still produce.
+  let weakIcon: string | undefined;
+  let best: OpenGraphData | undefined;
+
   for (const userAgent of USER_AGENTS) {
     // The UA is the only thing that differs between attempts, so label each
     // failure with it — "403 as browser, no og: tags as facebookexternalhit"
     // is the shape that tells you which knob (if any) is worth turning next.
     const label = userAgent.startsWith("facebookexternalhit") ? "facebookexternalhit" : "browser";
     const result = await attemptOpenGraph(pageUrl, userAgent);
-    if (result.data) return result.data;
-    failures.push(`${label}: ${result.failure}`);
+    if (result.failure) {
+      failures.push(`${label}: ${result.failure}`);
+      continue;
+    }
+    weakIcon ??= result.linkIcon;
+    if (result.data && Object.keys(result.data).length > 0) {
+      best = result.data;
+      break;
+    }
+    failures.push(`${label}: no og:, twitter: or title tags`);
   }
-  console.warn(`opengraph: no metadata for ${pageUrl} (${failures.join("; ")})`);
-  return null;
+
+  if (!best && !weakIcon) {
+    // Every page attempt struck out — the well-known paths need no HTML, so
+    // they're the last thing standing for a site that 403s its own homepage.
+    const icon = await wellKnownIcon(pageUrl);
+    if (icon) {
+      console.warn(`opengraph: ${pageUrl} served no page (${failures.join("; ")}) — fell back to ${icon}`);
+      return { imageUrl: icon };
+    }
+    console.warn(`opengraph: no metadata for ${pageUrl} (${failures.join("; ")}; no well-known icon either)`);
+    return null;
+  }
+
+  const data: OpenGraphData = best ?? {};
+  // Fill the icon from the weakest sources only if nothing better turned up —
+  // a page can perfectly well have og:title but no og:image.
+  if (!data.imageUrl) data.imageUrl = weakIcon ?? (await wellKnownIcon(pageUrl));
+  return Object.keys(data).length > 0 ? data : null;
 }
 
 /**
@@ -123,7 +234,7 @@ export async function fetchOpenGraph(pageUrl: string): Promise<OpenGraphData | n
 async function attemptOpenGraph(
   pageUrl: string,
   userAgent: string,
-): Promise<{ data?: OpenGraphData; failure?: string }> {
+): Promise<{ data?: OpenGraphData; linkIcon?: string; failure?: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
@@ -145,29 +256,32 @@ async function attemptOpenGraph(
     const html = await readHead(res, MAX_HTML_BYTES);
 
     const rawImage = metaContent(html, [...metaPatterns("og:image"), ...metaPatterns("twitter:image")]);
-    const rawTitle = metaContent(html, [...metaPatterns("og:title"), ...metaPatterns("twitter:title")]);
-    const rawDescription = metaContent(html, [
-      ...metaPatterns("og:description"),
-      ...metaPatterns("twitter:description"),
-    ]);
+    // <title>/<meta name="description"> as last resorts: a page with no social
+    // tags at all still almost always has these two, and a card showing the
+    // site's real name beats one showing nothing.
+    const rawTitle =
+      metaContent(html, [...metaPatterns("og:title"), ...metaPatterns("twitter:title")]) ??
+      titleTag(html);
+    const rawDescription =
+      metaContent(html, [...metaPatterns("og:description"), ...metaPatterns("twitter:description")]) ??
+      metaContent(html, metaPatterns("description"));
+
+    const absolute = (raw: string): string | undefined => {
+      try {
+        return new URL(decodeEntities(raw), res.url).toString();
+      } catch {
+        return undefined; // malformed URL — omit rather than fail the whole fetch
+      }
+    };
 
     const data: OpenGraphData = {};
-    if (rawImage) {
-      try {
-        data.imageUrl = new URL(decodeEntities(rawImage), res.url).toString();
-      } catch {
-        // malformed image URL — omit rather than fail the whole fetch
-      }
-    }
+    if (rawImage) data.imageUrl = absolute(rawImage);
+    if (data.imageUrl === undefined) delete data.imageUrl;
     if (rawTitle) data.title = decodeEntities(rawTitle);
     if (rawDescription) data.description = decodeEntities(rawDescription);
 
-    // A 200 with no usable og:/twitter: tags — the single most common outcome
-    // for sites that render their <head> client-side. Reported as a failure so
-    // the next User-Agent still gets its turn: some sites emit tags only for a
-    // recognized preview crawler.
-    if (Object.keys(data).length === 0) return { failure: "no og: or twitter: tags" };
-    return { data };
+    const rawLinkIcon = linkIcon(html);
+    return { data, linkIcon: rawLinkIcon ? absolute(rawLinkIcon) : undefined };
   } catch (e) {
     const aborted = e instanceof Error && e.name === "AbortError";
     return { failure: aborted ? `timeout after ${FETCH_TIMEOUT_MS / 1000}s` : `request failed (${e})` };

@@ -58,11 +58,93 @@ const MAX_HTML_BYTES: usize = 1_000_000;
 const TAGLINE_MAX: usize = 140;
 const DESCRIPTION_MAX: usize = 4000;
 
+/// Conventional icon locations, tried (in this order — the Apple one is
+/// 180x180, the .ico often still 16x16) only after every in-page source has
+/// come up empty. Worth the extra request because they need no HTML at all:
+/// the ~10 sites that hard-403 this fetcher's page requests mostly still
+/// serve their static assets to anyone, so this is the *only* thing that
+/// recovers an icon for them. Verified against the live app list: 4 of the
+/// 403-ing hosts (etherscan.io, canva.com, solscan.io, stockx.com) hand
+/// these over despite refusing their own homepage.
+///
+/// Keep in sync with app/src/lib/opengraph.ts's `WELL_KNOWN_ICON_PATHS`.
+const WELL_KNOWN_ICON_PATHS: [&str; 2] = ["/apple-touch-icon.png", "/favicon.ico"];
+
+/// Everything one page fetch yielded. `link_icon` is kept out of `og` so the
+/// caller can rank it below a real `og:image` from a later attempt rather
+/// than letting whichever User-Agent happened to go first win.
+#[derive(Debug, Default)]
+struct PageMetadata {
+    og: OpenGraphData,
+    link_icon: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct OpenGraphData {
     image_url: Option<String>,
     title: Option<String>,
     description: Option<String>,
+}
+
+impl OpenGraphData {
+    fn has_any(&self) -> bool {
+        self.image_url.is_some() || self.title.is_some() || self.description.is_some()
+    }
+}
+
+/// The page's `<title>`, used only when no `og:title`/`twitter:title` exists.
+/// `[^<]` rather than a lazy `.` so a page missing its `</title>` can't run
+/// the capture on into the rest of the document.
+fn title_tag(html: &str) -> Option<String> {
+    let pattern = Regex::new(r"(?is)<title[^>]*>([^<]*)</title>").expect("static pattern is valid");
+    let raw = pattern.captures(html)?.get(1)?.as_str().trim();
+    (!raw.is_empty()).then(|| raw.to_string())
+}
+
+/// Best `<link rel="...icon">` href, preferring `apple-touch-icon` (usually
+/// 180x180) over a bare `icon`/`shortcut icon` (often still a 16x16 .ico).
+///
+/// Parses each `<link>` tag whole and reads its attributes, rather than
+/// pattern-matching `rel` and `href` in a fixed order the way `meta_patterns`
+/// has to: `rel` is a space-separated *list* (`rel="shortcut icon"`), so
+/// matching it as an opaque string would miss half the web. `mask-icon` is
+/// deliberately excluded — it's a monochrome SVG silhouette for Safari's
+/// pinned tabs and renders as a black blob anywhere else.
+fn link_icon(html: &str) -> Option<String> {
+    let link_tag = Regex::new(r"(?is)<link\s[^>]*>").expect("static pattern is valid");
+    let attr = |tag: &str, name: &str| -> Option<String> {
+        let pattern = Regex::new(&format!(r#"(?is)\b{name}\s*=\s*["']([^"']*)["']"#))
+            .expect("static pattern is valid");
+        pattern
+            .captures(tag)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
+    };
+
+    let mut fallback: Option<String> = None;
+    for tag in link_tag.find_iter(html) {
+        let tag = tag.as_str();
+        let Some(rel) = attr(tag, "rel") else {
+            continue;
+        };
+        let Some(href) = attr(tag, "href").filter(|h| !h.is_empty()) else {
+            continue;
+        };
+        let rels: Vec<&str> = rel.split_whitespace().collect();
+        if rels.iter().any(|r| r.eq_ignore_ascii_case("mask-icon")) {
+            continue;
+        }
+        if rels.iter().any(|r| {
+            r.eq_ignore_ascii_case("apple-touch-icon")
+                || r.eq_ignore_ascii_case("apple-touch-icon-precomposed")
+        }) {
+            return Some(href);
+        }
+        if fallback.is_none() && rels.iter().any(|r| r.eq_ignore_ascii_case("icon")) {
+            fallback = Some(href);
+        }
+    }
+    fallback
 }
 
 /// Matches both attribute orders — `<meta property="og:x" content="...">`
@@ -119,18 +201,37 @@ fn decode_entities(s: &str) -> String {
 }
 
 /// Fetch `page_url` and extract its OpenGraph (falling back to Twitter card)
-/// metadata. Returns `None` on any network error, non-HTML response, or
-/// timeout, or if nothing was found — every caller treats this as "no data
-/// available", never as an error to propagate.
+/// metadata. Returns `None` only when every source below came up empty —
+/// every caller treats that as "no data available", never as an error to
+/// propagate.
 ///
-/// Tries each of `USER_AGENTS` in turn and takes the first that yields
-/// anything, then logs a single line naming what every attempt hit. That
-/// log line is the point: this used to swallow all four failure modes
-/// silently and identically, so an app that never got an icon was
-/// indistinguishable from one whose site has no og: tags at all — the only
-/// way to tell them apart was to re-probe the site by hand from outside.
+/// Sources, best first, because a majority of real sites serve *no* og:
+/// tags to a non-JS client and the old "og: or nothing" version simply gave
+/// up on them:
+///
+/// 1. `og:`/`twitter:` tags, per User-Agent in `USER_AGENTS`.
+/// 2. `<title>` / `<meta name="description">` — a plain page still names
+///    itself even with no social tags at all.
+/// 3. `<link rel="apple-touch-icon">`, then `<link rel="icon">`.
+/// 4. `WELL_KNOWN_ICON_PATHS`, which need no HTML and so are the only
+///    source that survives a site 403-ing the page fetch outright.
+///
+/// A weaker source is never allowed to displace a stronger one: a `<link>`
+/// icon found under the first UA is held aside and only used if no later
+/// attempt turns up a real `og:image`.
+///
+/// Whatever happens, one line is logged naming what every attempt hit —
+/// this used to swallow all its failure modes silently and identically, so
+/// an app that never got an icon was indistinguishable from one whose site
+/// genuinely has no tags, and telling them apart meant re-probing the site
+/// by hand from outside.
 async fn fetch_open_graph(http: &reqwest::Client, page_url: &str) -> Option<OpenGraphData> {
     let mut failures = Vec::with_capacity(USER_AGENTS.len());
+    // Held aside across attempts: a <link> icon is better than nothing but
+    // worse than an og:image a later User-Agent might still produce.
+    let mut weak_icon: Option<String> = None;
+    let mut best: Option<OpenGraphData> = None;
+
     for user_agent in USER_AGENTS {
         // The UA is the only thing that differs between attempts, so label
         // each failure with it — "403 as browser, no og: tags as
@@ -142,14 +243,96 @@ async fn fetch_open_graph(http: &reqwest::Client, page_url: &str) -> Option<Open
             "browser"
         };
         match try_fetch_open_graph(http, page_url, user_agent).await {
-            Ok(data) => return Some(data),
+            Ok(page) => {
+                if weak_icon.is_none() {
+                    weak_icon = page.link_icon;
+                }
+                if page.og.has_any() {
+                    best = Some(page.og);
+                    break;
+                }
+                failures.push(format!("{label}: no og:, twitter: or title tags"));
+            }
             Err(reason) => failures.push(format!("{label}: {reason}")),
         }
     }
-    log::info!(
-        "opengraph: no metadata for {page_url} ({})",
-        failures.join("; ")
-    );
+
+    let mut data = match best {
+        Some(data) => data,
+        // Every page attempt struck out. A held-aside <link> icon still
+        // counts as a result — an icon and nothing else is exactly what
+        // `apply_metadata_update` is built to merge in.
+        None if weak_icon.is_some() => OpenGraphData::default(),
+        None => {
+            let icon = well_known_icon(http, page_url).await;
+            return match icon {
+                Some(url) => {
+                    log::info!(
+                        "opengraph: {page_url} served no page ({}) — fell back to {url}",
+                        failures.join("; ")
+                    );
+                    Some(OpenGraphData {
+                        image_url: Some(url),
+                        ..Default::default()
+                    })
+                }
+                None => {
+                    log::info!(
+                        "opengraph: no metadata for {page_url} ({}; no well-known icon either)",
+                        failures.join("; ")
+                    );
+                    None
+                }
+            };
+        }
+    };
+
+    // Fill the icon from the weakest sources only if nothing better turned
+    // up — a page can perfectly well have og:title but no og:image.
+    if data.image_url.is_none() {
+        data.image_url = match weak_icon {
+            Some(icon) => Some(icon),
+            None => well_known_icon(http, page_url).await,
+        };
+    }
+    Some(data)
+}
+
+/// Probe `WELL_KNOWN_ICON_PATHS` against `page_url`'s origin, returning the
+/// first that answers with an actual image. The content-type check is the
+/// load-bearing part: a single-page app typically answers *every* unknown
+/// path — `/favicon.ico` included — with its 200 HTML shell, which would
+/// otherwise be stored as an icon URL that renders as a broken image.
+async fn well_known_icon(http: &reqwest::Client, page_url: &str) -> Option<String> {
+    let base = reqwest::Url::parse(page_url).ok()?;
+    for path in WELL_KNOWN_ICON_PATHS {
+        let Ok(candidate) = base.join(path) else {
+            continue;
+        };
+        // GET, not HEAD: plenty of static hosts answer HEAD with 405 while
+        // serving the file perfectly well. The body is never read — these
+        // are small, and dropping the response closes the connection.
+        let Ok(res) = http
+            .get(candidate.clone())
+            .header(reqwest::header::USER_AGENT, USER_AGENTS[0])
+            .timeout(FETCH_TIMEOUT)
+            .send()
+            .await
+        else {
+            continue;
+        };
+        if !res.status().is_success() {
+            continue;
+        }
+        let is_image = res
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("image/"));
+        if is_image {
+            return Some(res.url().to_string());
+        }
+    }
     None
 }
 
@@ -159,7 +342,7 @@ async fn try_fetch_open_graph(
     http: &reqwest::Client,
     page_url: &str,
     user_agent: &str,
-) -> Result<OpenGraphData, String> {
+) -> Result<PageMetadata, String> {
     let res = http
         .get(page_url)
         .header(reqwest::header::USER_AGENT, user_agent)
@@ -208,26 +391,30 @@ async fn try_fetch_open_graph(
     ]
     .concat();
 
-    let data = OpenGraphData {
-        image_url: meta_content(&html, &image_pats).and_then(|raw| {
-            final_url
-                .join(&decode_entities(&raw))
-                .ok()
-                .map(|u| u.to_string())
-        }),
-        title: meta_content(&html, &title_pats).map(|raw| decode_entities(&raw)),
-        description: meta_content(&html, &description_pats).map(|raw| decode_entities(&raw)),
+    let absolute = |raw: String| -> Option<String> {
+        final_url
+            .join(&decode_entities(&raw))
+            .ok()
+            .map(|u| u.to_string())
     };
 
-    if data.image_url.is_none() && data.title.is_none() && data.description.is_none() {
-        // A 200 with no usable og:/twitter: tags — the single most common
-        // outcome for sites that render their <head> client-side. Reported
-        // as a failure so the next User-Agent still gets its turn: some
-        // sites emit tags only for a recognized preview crawler.
-        Err("no og: or twitter: tags".to_string())
-    } else {
-        Ok(data)
-    }
+    let data = OpenGraphData {
+        image_url: meta_content(&html, &image_pats).and_then(absolute),
+        // `<title>`/`<meta name="description">` as last resorts: a page with
+        // no social tags at all still almost always has these two, and a card
+        // showing the site's real name beats one showing nothing.
+        title: meta_content(&html, &title_pats)
+            .or_else(|| title_tag(&html))
+            .map(|raw| decode_entities(&raw)),
+        description: meta_content(&html, &description_pats)
+            .or_else(|| meta_content(&html, &meta_patterns("description")))
+            .map(|raw| decode_entities(&raw)),
+    };
+
+    Ok(PageMetadata {
+        link_icon: link_icon(&html).and_then(absolute),
+        og: data,
+    })
 }
 
 /// Fetches `url`'s OpenGraph metadata and fills in whichever of icon/
@@ -319,6 +506,69 @@ mod tests {
 
     fn all_patterns(key: &str) -> Vec<Regex> {
         meta_patterns(key).to_vec()
+    }
+
+    /// Same class of bug as the test above, for the patterns `link_icon` and
+    /// `title_tag` build: both compile regexes at call time, so a malformed
+    /// one panics the enrichment task rather than failing to build.
+    #[test]
+    fn link_and_title_patterns_compile() {
+        link_icon("");
+        title_tag("");
+    }
+
+    #[test]
+    fn link_icon_prefers_apple_touch_icon_over_a_plain_icon() {
+        let html = r#"<link rel="icon" href="/small.ico">
+                      <link rel="apple-touch-icon" href="/big.png">"#;
+        assert_eq!(link_icon(html), Some("/big.png".to_string()));
+    }
+
+    /// `rel` is a space-separated list, so the common `rel="shortcut icon"`
+    /// spelling has to match the same as a bare `rel="icon"`.
+    #[test]
+    fn link_icon_matches_shortcut_icon_in_a_rel_list() {
+        let html = r#"<link rel="shortcut icon" href="/fav.ico">"#;
+        assert_eq!(link_icon(html), Some("/fav.ico".to_string()));
+    }
+
+    /// Safari's pinned-tab icon is a monochrome silhouette — usable as a
+    /// site icon nowhere else, so it must never be picked up.
+    #[test]
+    fn link_icon_ignores_mask_icon() {
+        let html = r##"<link rel="mask-icon" href="/mask.svg" color="#000">"##;
+        assert_eq!(link_icon(html), None);
+    }
+
+    #[test]
+    fn link_icon_handles_href_before_rel_and_single_quotes() {
+        let html = r#"<link href='/a.png' rel='apple-touch-icon'>"#;
+        assert_eq!(link_icon(html), Some("/a.png".to_string()));
+    }
+
+    #[test]
+    fn link_icon_returns_none_when_the_only_link_is_a_stylesheet() {
+        let html = r#"<link rel="stylesheet" href="/app.css">"#;
+        assert_eq!(link_icon(html), None);
+    }
+
+    #[test]
+    fn title_tag_reads_the_document_title() {
+        assert_eq!(
+            title_tag("<head><title>  Example Site  </title></head>"),
+            Some("Example Site".to_string())
+        );
+    }
+
+    /// An unclosed `<title>` must not swallow the rest of the document.
+    #[test]
+    fn title_tag_returns_none_when_unterminated() {
+        assert_eq!(title_tag("<title>no closing tag here"), None);
+    }
+
+    #[test]
+    fn title_tag_returns_none_for_an_empty_title() {
+        assert_eq!(title_tag("<title>   </title>"), None);
     }
 
     #[test]

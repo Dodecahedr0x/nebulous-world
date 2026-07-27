@@ -161,6 +161,90 @@ describe("fetchOpenGraph", () => {
     expect(data).toBeNull();
     vi.useRealTimers();
   });
+
+  // The fallback chain below exists because a majority of real sites serve no
+  // og: tags at all to a non-JS client — see the counts in opengraph.ts.
+  it("falls back to <link rel=apple-touch-icon> when there is no og:image", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        htmlResponse(`<head>
+          <title>Strava</title>
+          <link rel="icon" href="/small.ico">
+          <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+        </head>`),
+      ),
+    );
+    const data = await fetchOpenGraph("https://www.strava.com");
+    expect(data?.imageUrl).toBe("https://example.com/apple-touch-icon.png");
+    expect(data?.title).toBe("Strava");
+  });
+
+  it("uses <title> and <meta name=description> when no og:/twitter: tags exist", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        htmlResponse(`<head><title>Electrum</title>
+          <meta name="description" content="Bitcoin wallet"></head>`),
+      ),
+    );
+    const data = await fetchOpenGraph("https://electrum.org");
+    expect(data?.title).toBe("Electrum");
+    expect(data?.description).toBe("Bitcoin wallet");
+  });
+
+  it("never lets a <link> icon displace a real og:image", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        htmlResponse(`<head>
+          <link rel="apple-touch-icon" href="/icon.png">
+          <meta property="og:image" content="https://cdn.example.com/card.png">
+        </head>`),
+      ),
+    );
+    const data = await fetchOpenGraph("https://example.com");
+    expect(data?.imageUrl).toBe("https://cdn.example.com/card.png");
+  });
+
+  // The only source that survives a site refusing the page fetch outright.
+  it("probes well-known icon paths when every page attempt is refused", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: string | URL) => {
+        const url = String(input);
+        if (url.endsWith("/apple-touch-icon.png")) {
+          return {
+            ok: true,
+            url,
+            headers: new Headers({ "content-type": "image/png" }),
+          } as unknown as Response;
+        }
+        return { ok: false, status: 403, url, headers: new Headers() } as unknown as Response;
+      }),
+    );
+    const data = await fetchOpenGraph("https://www.stockx.com");
+    expect(data).toEqual({ imageUrl: "https://www.stockx.com/apple-touch-icon.png" });
+  });
+
+  // An SPA typically answers *every* unknown path with its HTML shell, so a
+  // 200 alone must never be taken as "this is an icon".
+  it("ignores a well-known path that answers with HTML rather than an image", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: string | URL) => {
+        const url = String(input);
+        return {
+          ok: !url.startsWith("https://spa.example.com/") || url.includes("favicon") || url.includes("apple-touch"),
+          status: 403,
+          url,
+          headers: new Headers({ "content-type": "text/html" }),
+        } as unknown as Response;
+      }),
+    );
+    const data = await fetchOpenGraph("https://spa.example.com");
+    expect(data).toBeNull();
+  });
 });
 
 describe("enrichWithOpenGraph", () => {

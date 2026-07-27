@@ -15,7 +15,7 @@
     "apps:discover": "tsx --env-file=.env scripts/discoverApps.ts",
     "apps:extend": "tsx --env-file=.env scripts/extendAppList.ts",
     "apps:curate": "tsx --env-file=.env scripts/apps-curator/server.ts",
-    "og:backfill": "tsx --env-file=.env scripts/backfillOpengraph.ts",
+    "og:backfill": "tsx scripts/backfillOpengraph.ts",
     "setup:dev": "bash scripts/setup-dev.sh",
     "teardown:dev": "bash scripts/teardown-dev.sh",
     "dev:all": "bash scripts/dev-all.sh",
