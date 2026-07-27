@@ -244,8 +244,21 @@ services:
         value: "8090"
 
 databases:
+  # basic-256mb, not free: a free instance is deleted at its 30-day expiry
+  # (this one was dated 2026-08-23), and it is the only store of anything
+  # that isn't reconstructible from chain — the App/Tag metadata the crawler
+  # parses out of each init_app's companion SPL Memo (see
+  # indexer/src/processors/product.rs) exists nowhere else, on-chain least of
+  # all. Losing it means every app falls back to its raw hex id for a name.
+  #
+  # `plan` is mutable, unlike databaseName/user/region/postgresMajorVersion —
+  # this is an in-place instance-type change, not a recreate, so the data
+  # survives it. It does take a short outage while the instance moves
+  # (no HA on this tier), during which the app serves errors from its
+  # Prisma reads and the indexer's crawler tick logs failures and retries on
+  # its next poll — nothing that needs manual repair afterwards.
   - name: nebulous-world-db
     databaseName: nebulous_world
-    plan: free
+    plan: basic-256mb
     postgresMajorVersion: "16"
     ipAllowList: []
