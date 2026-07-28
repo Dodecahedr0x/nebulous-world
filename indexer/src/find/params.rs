@@ -57,6 +57,29 @@ pub const CORRELATION_DAMPING: f64 = 0.7;
 /// a numerical guard; change only if the IG computation's scale changes.
 pub const MIN_INFORMATION_GAIN: f64 = 1e-6;
 
+/// How hard to push the next question AWAY from what has already been asked.
+///
+/// Raw `argmax` IG has a failure that is invisible in the maths and obvious in
+/// play: the highest-gain facet after "no, not Solana" is usually *another
+/// chain*, because chains partition the catalog and so each one is individually
+/// very informative. The funnel then spends its eight questions walking one
+/// dimension — "not Solana? not Ethereum? not Base?" — which is both a worse
+/// search and a worse game.
+///
+/// The fix is to discount a facet by how much an already-answered facet has
+/// ALREADY told us about it, measured as normalized mutual information between
+/// the two (`selection::facet_dependence`). Note this is dependence, not
+/// overlap: set overlap would score two chains as maximally distant, since an
+/// app has exactly one chain and their Present sets are disjoint. Dependence
+/// correctly scores them as near-identical questions, because knowing one
+/// answer largely determines the other.
+///
+/// `0.0` restores plain argmax IG; `1.0` would let a perfectly-dependent facet
+/// be discounted to zero gain. Raise it if the funnel still feels repetitive,
+/// lower it if it starts asking scattered low-value questions to avoid
+/// repetition.
+pub const DIVERSITY_WEIGHT: f64 = 0.75;
+
 /// A tag must be carried by at least this many apps to be worth asking about —
 /// a tag on one app splits the field almost not at all and reads as a trivia
 /// question. Raise it if question quality complaints centre on obscure tags.

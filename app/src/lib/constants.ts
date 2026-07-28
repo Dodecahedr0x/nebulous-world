@@ -87,13 +87,15 @@ export const FIND_MAX_QUESTIONS = 8;
 
 /** The complete v1 answer vocabulary. "Don't care" performs no scoring update
     at all — it is an escape, not a hedge, so it cannot skew the posterior. */
+/** `key` is the single-press shortcut. Answering is the only thing this page
+    asks you to do, so it should not require aiming at a button. */
 export const FIND_ANSWER_OPTIONS = [
-  { value: "yes", label: "Yes" },
-  { value: "no", label: "No" },
-  { value: "skip", label: "Don't care" },
+  { value: "yes", label: "Yes", key: "y" },
+  { value: "no", label: "No", key: "n" },
+  { value: "skip", label: "Don't care", key: "d" },
 ] as const;
 
 export const FIND_PAGE_TITLE = "Find an app";
 
 export const FIND_PAGE_DESCRIPTION =
-  "Answer a few quick questions and we'll point you at the app that fits.";
+  "Yes or no, a few times over — we narrow the whole catalog down to the one app that fits.";
