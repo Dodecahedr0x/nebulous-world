@@ -23,7 +23,12 @@ test.describe("the URL drives the funnel", () => {
     await expect(
       page.getByRole("heading", { name: "Do you want to lend or borrow?" }),
     ).toBeVisible();
-    await expect(page.getByText("Question 2 of up to 8")).toBeVisible();
+    // Progress is pips rather than a sentence now, so this asserts the
+    // progressbar's accessible name — which is the contract a screen reader
+    // actually gets, and does not re-break the next time the visual changes.
+    await expect(
+      page.getByRole("progressbar", { name: "Question 2 of up to 8" }),
+    ).toBeVisible();
     // Back only renders when the reducer holds an answer (canGoBack), so its
     // presence is the proof that `restore` reached the reducer rather than
     // `request` having quietly carried the history on its own.

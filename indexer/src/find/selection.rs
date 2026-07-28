@@ -10,7 +10,7 @@
 //! support, not proof, since their result covers arbitrary-subset questions
 //! rather than a fixed facet list.
 
-use crate::find::{params, scoring, Answer, AnswerValue, Candidate, FacetRef};
+use crate::find::{params, scoring, Answer, AnswerValue, Candidate, FacetKind, FacetRef};
 
 /// Shannon entropy in nats. `0.0` for an empty or degenerate distribution;
 /// zero-probability terms are skipped rather than evaluated, since `0 * ln 0` is
@@ -77,12 +77,120 @@ pub fn expected_information_gain(candidates: &[Candidate], post: &[f64], facet: 
     (entropy(post) - conditional).max(0.0)
 }
 
-/// `argmax` IG over `pool`, skipping facets already answered.
+/// Probability that `facet` is present on `candidate`, as a soft indicator.
+///
+/// `Unknown` resolves to the tag-prevalence prior rather than to 0, for the same
+/// reason `scoring` marginalizes it: an unrecorded tag is not a recorded
+/// absence, and collapsing it to 0 would make every thinly-tagged app look
+/// identical to every app that genuinely lacks the tag.
+fn presence(candidate: &Candidate, facet: &FacetRef) -> f64 {
+    match candidate.state(facet) {
+        crate::find::FacetState::Present => 1.0,
+        crate::find::FacetState::Absent => 0.0,
+        crate::find::FacetState::Unknown => params::TAG_PREVALENCE_PRIOR,
+    }
+}
+
+/// How much a question about `a` already covers a question about `b`, in
+/// `[0, 1]`. `1.0` means asking `b` next is asking the same thing again.
+///
+/// Two rules, because there are two genuinely different relationships here and
+/// one measure cannot see both:
+///
+/// 1. **Same single-valued field ⇒ fully redundant.** `category` and `chain` are
+///    one-of-N columns on the app row: every app has exactly one. So "not
+///    Solana?" followed by "not Ethereum?" is one dimension asked twice, however
+///    the numbers fall. This is structural and no statistic recovers it —
+///    measured mutual information between two *individually rare* exclusive
+///    values is genuinely small (with six chains, ruling out one moves another
+///    from 1/6 to 1/5), so a purely statistical rule scores them as independent
+///    and the funnel marches down the list. Tags are multi-valued and get no
+///    such rule.
+///
+/// 2. **Otherwise, normalized mutual information** between the two presence
+///    indicators, which catches co-occurrence a field rule cannot: `lending`
+///    and `defi` are different kinds but nearly the same question.
+///
+/// Measured over a **uniform** distribution, deliberately, not the live
+/// posterior. This asks "how related are these two questions in this catalog",
+/// which is a property of the data. Under the posterior the answered facet has
+/// already collapsed to near-zero mass, its marginal entropy goes with it, and
+/// every dependence involving it reads as ~0 — the measure would switch itself
+/// off at exactly the moment it is needed.
+pub fn facet_dependence(candidates: &[Candidate], a: &FacetRef, b: &FacetRef) -> f64 {
+    if candidates.is_empty() {
+        return 0.0;
+    }
+    if a == b {
+        return 1.0;
+    }
+    if a.kind == b.kind && matches!(a.kind, FacetKind::Category | FacetKind::Chain) {
+        return 1.0;
+    }
+
+    let w = 1.0 / candidates.len() as f64;
+    let mut joint = [0.0f64; 4];
+    for candidate in candidates {
+        let pa = presence(candidate, a);
+        let pb = presence(candidate, b);
+        joint[0] += w * pa * pb;
+        joint[1] += w * pa * (1.0 - pb);
+        joint[2] += w * (1.0 - pa) * pb;
+        joint[3] += w * (1.0 - pa) * (1.0 - pb);
+    }
+    let total: f64 = joint.iter().sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    for cell in joint.iter_mut() {
+        *cell /= total;
+    }
+
+    let p_a = joint[0] + joint[1];
+    let p_b = joint[0] + joint[2];
+    let marginals = [
+        p_a * p_b,
+        p_a * (1.0 - p_b),
+        (1.0 - p_a) * p_b,
+        (1.0 - p_a) * (1.0 - p_b),
+    ];
+
+    let mut mi = 0.0;
+    for (observed, independent) in joint.iter().zip(&marginals) {
+        if *observed > 0.0 && *independent > 0.0 {
+            mi += observed * (observed / independent).ln();
+        }
+    }
+
+    let h_a = entropy(&[p_a, 1.0 - p_a]);
+    let h_b = entropy(&[p_b, 1.0 - p_b]);
+    let floor = h_a.min(h_b);
+    if floor <= 0.0 {
+        return 0.0;
+    }
+    (mi / floor).clamp(0.0, 1.0)
+}
+
+/// The next question: `argmax` of information gain **discounted by how much the
+/// answers so far already imply it**, skipping facets already answered.
+///
+/// Plain `argmax` IG walks one dimension. Chains partition the catalog, so each
+/// is individually high-gain, and "not Solana?" is reliably followed by "not
+/// Ethereum?" — a worse search (the second question is mostly answered by the
+/// first) and a worse game. Discounting by `facet_dependence` against every
+/// answered facet makes the funnel change subject once a dimension is spent.
+///
+/// The discount is a scale on gain, never a filter: a facet that is the only
+/// informative one left still gets asked, just at a reduced score. So this can
+/// reorder questions but cannot strand the funnel with nothing to ask, and
+/// `params::DIVERSITY_WEIGHT = 0.0` recovers the previous behaviour exactly.
 ///
 /// `None` when the pool is exhausted or nothing clears
 /// `params::MIN_INFORMATION_GAIN` — the caller reads that as "stop asking", not
-/// as an error. Ties break toward the earlier pool entry, so question order is
-/// deterministic for a given catalog rather than dependent on iteration luck.
+/// as an error. The floor is applied to raw gain, before the discount, so
+/// turning diversity up can never silently stop the funnel early. Ties break
+/// toward the earlier pool entry, so question order is deterministic for a given
+/// catalog rather than dependent on iteration luck.
 pub fn select_question(
     candidates: &[Candidate],
     answers: &[Answer],
@@ -99,8 +207,13 @@ pub fn select_question(
         if gain < params::MIN_INFORMATION_GAIN {
             continue;
         }
-        if best.is_none_or(|(_, top)| gain > top) {
-            best = Some((facet, gain));
+        let implied = answers
+            .iter()
+            .map(|a| facet_dependence(candidates, facet, &a.facet))
+            .fold(0.0f64, f64::max);
+        let score = gain * (1.0 - params::DIVERSITY_WEIGHT * implied);
+        if best.is_none_or(|(_, top)| score > top) {
+            best = Some((facet, score));
         }
     }
 
@@ -187,6 +300,129 @@ mod tests {
             kind: FacetKind::Category,
             value: value.into(),
         }
+    }
+
+    fn chain(value: &str) -> FacetRef {
+        FacetRef {
+            kind: FacetKind::Chain,
+            value: value.into(),
+        }
+    }
+
+    /// One app per chain plus a tag that cuts across all of them, so the chain
+    /// facets are individually high-gain (they partition the field) while the
+    /// tag is the only question that asks about something else.
+    /// Every app shares one category, so category facets carry no information
+    /// and the contest is genuinely between "another chain" and "a tag". The tag
+    /// is deliberately sparse, so its raw gain sits BELOW the next chain's — the
+    /// funnel only reaches it by trading information gain for a change of
+    /// subject, which is exactly the trade `DIVERSITY_WEIGHT` exists to make.
+    fn one_category_fixture() -> Vec<Candidate> {
+        ["solana", "ethereum", "base", "polygon", "bitcoin", "aptos"]
+            .iter()
+            .enumerate()
+            .flat_map(|(i, ch)| {
+                (0..2).map(move |j| {
+                    let mut c = candidate(
+                        &format!("{ch}{j}"),
+                        "defi",
+                        if i == 1 && j == 0 { &["custody"] } else { &[] },
+                        0.5,
+                    );
+                    c.chain = (*ch).into();
+                    c
+                })
+            })
+            .collect()
+    }
+
+    fn multi_chain_fixture() -> Vec<Candidate> {
+        ["solana", "ethereum", "base", "polygon", "bitcoin", "aptos"]
+            .iter()
+            .enumerate()
+            .flat_map(|(i, ch)| {
+                (0..2).map(move |j| {
+                    let mut c = candidate(
+                        &format!("{ch}{j}"),
+                        if j == 0 { "defi" } else { "nft" },
+                        if (i + j) % 2 == 0 { &["custody"] } else { &[] },
+                        0.5,
+                    );
+                    c.chain = (*ch).into();
+                    c
+                })
+            })
+            .collect()
+    }
+
+    /// The behaviour the whole diversity term exists for: after "no, not
+    /// Solana", the funnel must change subject rather than marching down the
+    /// chain list. Under plain argmax IG the next pick is another chain, because
+    /// chains partition the catalog and so each is individually informative —
+    /// but the second chain question is mostly answered by the first.
+    #[test]
+    fn a_rejected_chain_does_not_lead_to_another_chain() {
+        let candidates = one_category_fixture();
+        // Raw gain here ranks ethereum (0.335) above custody (0.141): without
+        // the diversity discount argmax picks another chain every time.
+        let pool = vec![
+            chain("solana"),
+            chain("ethereum"),
+            chain("base"),
+            chain("polygon"),
+            category("defi"),
+            tag("custody"),
+        ];
+        let answers = vec![Answer {
+            facet: chain("solana"),
+            value: AnswerValue::No,
+        }];
+
+        let next = select_question(&candidates, &answers, &pool).expect("a question remains");
+        assert_ne!(
+            next.kind,
+            FacetKind::Chain,
+            "after rejecting a chain the funnel asked about {next:?} — another chain is \
+             nearly the same question, since ruling one out just shifts mass onto the rest"
+        );
+    }
+
+    /// The discount scales gain, it never filters. A facet that is the only
+    /// informative one left must still be asked however dependent it is on what
+    /// came before, or the funnel would strand itself with questions available.
+    #[test]
+    fn diversity_reorders_but_never_strands_the_funnel() {
+        let candidates = one_category_fixture();
+        let answers = vec![Answer {
+            facet: chain("solana"),
+            value: AnswerValue::No,
+        }];
+        let only_chains = vec![chain("ethereum"), chain("base")];
+
+        assert!(
+            select_question(&candidates, &answers, &only_chains).is_some(),
+            "diversity discounted every remaining facet to nothing and stopped the funnel early"
+        );
+    }
+
+    /// Two values of the same single-valued field are the same question asked
+    /// twice, and nothing statistical shows that: with six chains, ruling one out
+    /// only moves another from 1/6 to 1/5, so measured mutual information between
+    /// them is genuinely small. An overlap measure is worse still — their Present
+    /// sets are disjoint, so Jaccard calls them maximally *distant*. Only the
+    /// structural rule gets this right.
+    #[test]
+    fn exclusive_facets_score_as_dependent_not_distant() {
+        let candidates = multi_chain_fixture();
+
+        let across_dimensions = facet_dependence(&candidates, &chain("solana"), &tag("custody"));
+        let same_dimension = facet_dependence(&candidates, &chain("solana"), &chain("ethereum"));
+
+        assert!(
+            same_dimension > across_dimensions,
+            "two mutually exclusive chains scored {same_dimension} against {across_dimensions} \
+             for a cross-cutting tag — the measure is reading exclusivity as independence"
+        );
     }
 
     /// Ten candidates, all with the same content score so the starting posterior

@@ -121,61 +121,77 @@ export function FindResults({
 
   return (
     <div className="space-y-6">
-      <div className="card p-6 sm:p-8">
-        <p className="text-xs uppercase tracking-wide text-slate-steel">Our suggestion</p>
-        <h2 className="mt-1 font-display text-heading-sm font-normal text-ink">
-          Is this the one?
-        </h2>
-        {/* Confidence is spelled out in words as well as drawn as a bar —
-            the bar alone would make length the sole signal. */}
-        <p className="mt-2 text-sm text-slate">
-          {Math.round(top.confidence * 100)}% confidence, based on your answers.
-        </p>
-        <div
-          role="presentation"
-          className="mt-2 h-1.5 w-full overflow-hidden rounded-pill bg-mist"
-        >
+      {/* Keyed on the app so "Not quite" REPLAYS the reveal for the next
+          candidate rather than swapping text under a static frame. The beat is
+          the point: each rejection should feel like the game answering again. */}
+      <div key={top.app.id} className="space-y-6">
+        <div className="animate-fade-in rounded-[20px] border border-hairline bg-ivory p-6 shadow-rest sm:p-8">
+          <p className="text-caption uppercase tracking-wide text-slate-steel">Our suggestion</p>
+          <h2 className="mt-1 text-balance font-display text-heading-sm font-semibold leading-tight tracking-tight text-ink">
+            Is this the one?
+          </h2>
+          {/* Confidence is spelled out in words as well as drawn as a bar —
+              the bar alone would make length the sole signal. */}
+          <p className="mt-2 text-sm text-slate">
+            <span className="font-mono tabular-nums text-ink">
+              {Math.round(top.confidence * 100)}%
+            </span>{" "}
+            confidence, based on your answers.
+          </p>
           <div
-            className="h-full rounded-pill bg-cobalt"
-            style={{ width: `${Math.round(top.confidence * 100)}%` }}
-          />
+            role="presentation"
+            className="mt-2 h-1.5 w-full overflow-hidden rounded-pill bg-mist"
+          >
+            <div
+              className="h-full rounded-pill bg-cobalt transition-[width] duration-500 ease-out"
+              style={{ width: `${Math.round(top.confidence * 100)}%` }}
+            />
+          </div>
+
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setConfirmed(true);
+                onConfirm(top.app.id);
+              }}
+              className={`btn-primary transition-[color,background-color,box-shadow,scale] active:scale-[0.96] disabled:active:scale-100 ${FOCUS_RING}`}
+            >
+              Yes, that is it
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                onReject(top.app.id);
+                setCursor((c) => c + 1);
+              }}
+              className={`btn-secondary transition-[color,background-color,border-color,box-shadow,scale] active:scale-[0.96] disabled:active:scale-100 ${FOCUS_RING}`}
+            >
+              Not quite
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onRestart}
+              className={`btn-ghost ml-auto min-h-[40px] px-4 py-2 text-sm transition-[color,background-color,scale] active:scale-[0.96] ${FOCUS_RING}`}
+            >
+              Start over
+            </button>
+          </div>
         </div>
 
-        <div className="mt-5 flex flex-wrap gap-3">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              setConfirmed(true);
-              onConfirm(top.app.id);
-            }}
-            className={`btn-primary ${FOCUS_RING}`}
-          >
-            Yes, that is it
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              onReject(top.app.id);
-              setCursor((c) => c + 1);
-            }}
-            className={`btn-secondary ${FOCUS_RING}`}
-          >
-            Not quite
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onRestart}
-            className={`btn-ghost ml-auto px-4 py-2 text-sm ${FOCUS_RING}`}
-          >
-            Start over
-          </button>
+        {/* One beat behind the header, so the answer arrives rather than
+            appearing already there. backwards fill keeps it hidden through
+            the delay instead of flashing at full opacity first. */}
+        <div
+          className="animate-fade-in"
+          style={{ animationDelay: "110ms", animationFillMode: "backwards" }}
+        >
+          <AppCard app={top.app} />
         </div>
       </div>
-
-      <AppCard app={top.app} />
 
       {rest.length > 0 && (
         <div>

@@ -10,7 +10,6 @@ import {
   funnelReducer,
   initialFunnelState,
   canGoBack,
-  funnelProgress,
   turnstileSiteKey,
   initialTurnstileTokenState,
   tokenToSend,
@@ -236,7 +235,6 @@ export function FindFunnel({ initialResult }: { initialResult: FindNextResult | 
   };
 
   const result = state.result;
-  const progress = funnelProgress(state);
 
   return (
     <div data-testid="find-funnel" className="space-y-6">
@@ -252,22 +250,6 @@ export function FindFunnel({ initialResult }: { initialResult: FindNextResult | 
           <div ref={widgetRef} />
         </>
       )}
-
-      <div>
-        <div
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(progress * 100)}
-          aria-label="Funnel progress"
-          className="h-1 w-full overflow-hidden rounded-pill bg-mist"
-        >
-          <div
-            className="h-full rounded-pill bg-cobalt transition-[width] duration-300 ease-out"
-            style={{ width: `${Math.round(progress * 100)}%` }}
-          />
-        </div>
-      </div>
 
       {state.error && (
         <div role="alert" className="card border-negative/40 p-4 text-sm text-negative">
@@ -307,6 +289,7 @@ export function FindFunnel({ initialResult }: { initialResult: FindNextResult | 
         <QuestionCard
           question={result.question}
           questionsAsked={result.questionsAsked}
+          candidateCount={result.candidateCount}
           disabled={state.loading}
           onAnswer={handleAnswer}
           onBack={handleBack}
