@@ -39,3 +39,9 @@ solana-transaction = { version = "3", features = ["serde"] }
 solana-transaction-status = "3.1"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "chrono", "macros"] }
 tokio = { version = "1.53.0", features = ["full"] }
+
+[dev-dependencies]
+# `ServiceExt::oneshot`, so src/find_integration.rs can drive the real axum
+# Router with real path strings. 0.5 to match what axum 0.7.9 already locks —
+# a 0.4 pin would add a duplicate major to Cargo.lock for nothing.
+tower = { version = "0.5", features = ["util"] }

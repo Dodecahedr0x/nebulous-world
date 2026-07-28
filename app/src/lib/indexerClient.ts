@@ -19,7 +19,14 @@
 // right before use.
 
 import { config } from "@/lib/config";
-import type { AppDTO, AppDetail, SearchResult } from "@/lib/types";
+import type {
+  AppDTO,
+  AppDetail,
+  FindConfirmInput,
+  FindNextInput,
+  FindNextResult,
+  SearchResult,
+} from "@/lib/types";
 import type { SearchInput } from "@/lib/validation";
 
 const INDEXER_API_URL = config.indexerApiUrl;
@@ -681,4 +688,16 @@ export interface X402SettleInput {
 /** Verifies + submits an x402 payment transaction — see indexer/src/handlers/x402.rs and app/src/lib/x402.ts. Throws (via post()'s error handling) if the transaction doesn't match what was expected or fails to land. */
 export async function settleX402Payment(input: X402SettleInput): Promise<{ settled: boolean; transaction: string }> {
   return (await post("/x402/settle", input)) as { settled: boolean; transaction: string };
+}
+
+/** One turn of the /find funnel. Stateless: the whole answer history rides on
+    every request, and the response carries no candidate set — see
+    indexer/src/handlers/find.rs. */
+export async function fetchNextFindQuestion(input: FindNextInput): Promise<FindNextResult> {
+  return (await post("/find/next", input)) as FindNextResult;
+}
+
+/** Records a funnel outcome as training signal. Idempotent per (sessionId, appId, outcome). */
+export async function recordFindOutcome(input: FindConfirmInput): Promise<{ ok: true }> {
+  return (await post("/find/confirm", input)) as { ok: true };
 }

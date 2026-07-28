@@ -4,6 +4,12 @@ mod config;
 mod crawler;
 mod db;
 mod dlmm_bridge;
+mod find;
+/// The live-Postgres tier for `/find` (A77). `#[cfg(test)]` so it adds no
+/// target and compiles to nothing in release; there is no `[lib]` to put it in
+/// (A84). Every test in it is `#[ignore]`d — see the module doc for the command.
+#[cfg(test)]
+mod find_integration;
 mod handlers;
 mod opengraph;
 mod platform_metrics;

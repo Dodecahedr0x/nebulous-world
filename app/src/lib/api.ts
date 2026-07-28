@@ -86,12 +86,45 @@ export const RATE_LIMITS = {
   auth: { scope: "auth", limit: 10, windowMs: 60_000 },
 } as const;
 
+/**
+ * The throttling identity for an unauthenticated caller.
+ *
+ * Takes the LAST `x-forwarded-for` entry, not the first. A reverse proxy
+ * *appends* the peer it observed rather than replacing the header, so with
+ * exactly one trusted proxy in front (Render's load balancer — `render.yaml`
+ * declares `type: web`) the rightmost entry is the only value Render itself
+ * vouched for. Everything to its left arrived from the caller and is therefore
+ * attacker-chosen: reading index 0 let anyone mint a fresh rate-limit bucket
+ * per request just by varying the header, which defeats every IP-keyed limit
+ * in `RATE_LIMITS`.
+ *
+ * This is deliberately NOT the same rule as `tracking.ts`'s
+ * `clientIpFromHeaders` — that answers "which visitor is this", where a
+ * forged value costs the forger their own identity, while this answers "whom
+ * do I throttle", where the field is adversarial by definition.
+ *
+ * Depth is one because Render is the only proxy. Putting another one in front
+ * (Cloudflare proxying, a second LB) shifts the trusted entry left by one and
+ * this must change with it — an unverified `x-forwarded-for` is never safe to
+ * index from either end without knowing the depth.
+ */
+export function throttleIdentityFromHeaders(headers: Headers): string {
+  const forwardedFor = headers.get("x-forwarded-for");
+  if (forwardedFor) {
+    const hops = forwardedFor
+      .split(",")
+      .map((hop) => hop.trim())
+      .filter(Boolean);
+    if (hops.length > 0) return hops[hops.length - 1]!;
+  }
+  // No proxy in front (local `next dev`, or direct-to-instance traffic).
+  // `unknown` collapses every such caller into one shared bucket, which fails
+  // closed: it throttles too much rather than not at all.
+  return headers.get("x-real-ip") ?? "unknown";
+}
+
 function clientIp(req: NextRequest): string {
-  // Render (like most PaaS reverse proxies) sets x-forwarded-for; take the
-  // first hop, which is the original client.
-  const forwardedFor = req.headers.get("x-forwarded-for");
-  if (forwardedFor) return forwardedFor.split(",")[0]!.trim();
-  return req.headers.get("x-real-ip") ?? "unknown";
+  return throttleIdentityFromHeaders(req.headers);
 }
 
 /**

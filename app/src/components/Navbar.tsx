@@ -14,6 +14,7 @@ import { cn, formatToken } from "@/lib/utils";
 
 const NAV = [
   { href: "/", label: "Browse" },
+  { href: "/find", label: "Find" },
   { href: "/rankings", label: "Rankings" },
   { href: "/rewards", label: "Rewards" },
   { href: "/about", label: "About" },
@@ -26,7 +27,7 @@ export function Navbar() {
   const userLevel = useUserLevel();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Below md, the 4-link nav lives in a dropdown instead — close it on any
+  // Below md, the nav lives in a dropdown instead — close it on any
   // route change (a link click, back/forward, or a deep link elsewhere in
   // the app) so it never lingers open over the new page.
   useEffect(() => {

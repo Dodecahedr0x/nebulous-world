@@ -81,3 +81,19 @@ export const SITE_TWITTER_URL =
  */
 export const SITE_DOCS_URL =
   process.env.NEXT_PUBLIC_DOCS_URL || "https://nebulous-world-docs.onrender.com";
+
+/** Hard cap on funnel length — mirrors indexer/src/find/params.rs's MAX_QUESTIONS. */
+export const FIND_MAX_QUESTIONS = 8;
+
+/** The complete v1 answer vocabulary. "Don't care" performs no scoring update
+    at all — it is an escape, not a hedge, so it cannot skew the posterior. */
+export const FIND_ANSWER_OPTIONS = [
+  { value: "yes", label: "Yes" },
+  { value: "no", label: "No" },
+  { value: "skip", label: "Don't care" },
+] as const;
+
+export const FIND_PAGE_TITLE = "Find an app";
+
+export const FIND_PAGE_DESCRIPTION =
+  "Answer a few quick questions and we'll point you at the app that fits.";

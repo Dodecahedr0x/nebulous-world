@@ -163,3 +163,41 @@ export const searchSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).optional().default(20),
 });
 export type SearchInput = z.infer<typeof searchSchema>;
+
+// The /find funnel. Both routes are stateless — the client posts its whole
+// answer history each turn (see .agent/tree/1.md's wire contract).
+
+const findFacetSchema = z.object({
+  kind: z.enum(["category", "chain", "tag"]),
+  value: z.string().min(1).max(64),
+});
+
+const findAnswerSchema = z.object({
+  facet: findFacetSchema,
+  // Exactly Yes / No / Don't care. Hedged answers ("probably") are out of the
+  // v1 vocabulary: no citable likelihood exists for them, and this term feeds
+  // the stopping threshold, so an invented one would silently mis-tune it.
+  value: z.enum(["yes", "no", "skip"]),
+});
+
+// `.max(16)` rather than FIND_MAX_QUESTIONS (8) because the client can revise
+// an earlier answer via back/re-answer — this is a cheap upper bound on a body
+// the server will re-score, not a restatement of the question cap.
+export const findNextSchema = z.object({
+  answers: z.array(findAnswerSchema).max(16).optional().default([]),
+  forceResults: z.boolean().optional().default(false),
+});
+
+// Deliberately no visitorId/sessionId: both are derived server-side from
+// request headers by resolveVisitor (@/lib/tracking), exactly as
+// api/track/route.ts already does. A client-supplied visitor identity would
+// make confirmation farming free.
+export const findConfirmSchema = z.object({
+  answers: z.array(findAnswerSchema).max(16).optional().default([]),
+  appId: z.string().min(1),
+  outcome: z.enum(["confirmed", "rejected", "clicked"]),
+  turnstileToken: z.string().nullable().optional(),
+});
+
+export type FindNextRequest = z.infer<typeof findNextSchema>;
+export type FindConfirmRequest = z.infer<typeof findConfirmSchema>;

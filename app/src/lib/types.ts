@@ -74,3 +74,54 @@ export interface AppDetail {
     rankScore: number;
   }[];
 }
+
+// The /find funnel's wire vocabulary. Spellings are fixed by the Rust side
+// (indexer/src/find/mod.rs) and must match it character for character.
+
+export interface FacetRef {
+  kind: "category" | "chain" | "tag";
+  value: string;
+}
+
+export interface FindQuestion {
+  facet: FacetRef;
+  prompt: string;
+}
+
+export interface FindAnswer {
+  facet: FacetRef;
+  value: "yes" | "no" | "skip";
+}
+
+export interface FindShortlistEntry {
+  app: AppDTO;
+  /** Posterior probability this is the app the visitor wants, 0..1. */
+  confidence: number;
+}
+
+export interface FindNextResult {
+  question: FindQuestion | null;
+  /** Empty unless `done` — a leak control, not a UI convenience. `/api/data/*`
+      sells this catalog per request in NEB via x402, so returning ranked apps
+      on every turn would let a caller sweep answer combinations and enumerate
+      the catalog one HTTP call at a time. `candidateCount` gives the UI its
+      progress signal without identities. */
+  shortlist: FindShortlistEntry[];
+  candidateCount: number;
+  questionsAsked: number;
+  /** `question` is null iff this is true. */
+  done: boolean;
+}
+
+export interface FindNextInput {
+  answers: FindAnswer[];
+  forceResults?: boolean;
+}
+
+export interface FindConfirmInput {
+  answers: FindAnswer[];
+  appId: string;
+  outcome: "confirmed" | "rejected" | "clicked";
+  visitorId: string;
+  sessionId: string;
+}

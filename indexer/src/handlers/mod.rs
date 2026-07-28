@@ -12,6 +12,7 @@
 pub mod ads;
 pub mod apps;
 pub mod engine;
+pub mod find;
 pub mod platform;
 pub mod revenue;
 pub mod rewards;

@@ -41,3 +41,9 @@ yarn-error.log*
 /.impeccable/live/sessions
 /.impeccable/live/accept-receipts
 /.impeccable/hook.cache.json
+
+# buildteam run state (scaffolding; durable artifacts live in docs/plans/)
+/.agent
+
+# python bytecode
+__pycache__/

@@ -3239,6 +3239,7 @@ dependencies = [
  "solana-transaction-status",
  "sqlx",
  "tokio",
+ "tower",
 ]
 
 [[package]]
