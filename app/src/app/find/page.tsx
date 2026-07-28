@@ -55,7 +55,7 @@ export default async function FindPage({ searchParams }: PageProps) {
   return (
     <div className="space-y-6">
       <PageHeader title={FIND_PAGE_TITLE} description={FIND_PAGE_DESCRIPTION} />
-      <div className="max-w-3xl">
+      <div>
         <FindFunnel initialResult={initialResult} />
       </div>
     </div>
