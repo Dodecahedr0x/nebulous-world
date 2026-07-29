@@ -63,6 +63,20 @@ services:
       - key: NODE_ENV
         value: production
 
+      # glibc opens up to 8 malloc arenas per core for multi-threaded native
+      # allocation. sharp/libvips — which next/image runs in-process to resize
+      # third-party app icons — is exactly that workload, and the per-arena
+      # free lists meant freed image buffers were never returned to the OS:
+      # RSS climbed and stayed climbed until the instance was OOM-killed
+      # (22 restarts over 3.5 days before this).
+      #
+      # Measured in a 512MB container against a 4000x2100 source, 8 concurrent
+      # optimizations x 24 rounds: 291MB plateau without this, 216MB with it —
+      # and with it the number falls again between bursts instead of ratcheting
+      # up. See app/next.config.mjs for the other half of this fix.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+
       # --- Solana & indexer (see envVarGroups at the top of this file) ---
       # Only used to tell the connected wallet extension which chain it's
       # operating on (see SolanaProvider.tsx) — the app has no RPC
