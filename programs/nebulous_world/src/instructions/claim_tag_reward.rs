@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{Token, TokenAccount};
 
 use crate::constants::{APP_SEED, APP_TAG_STAKE_SEED, CONFIG_SEED, STAKE_POSITION_SEED};
@@ -24,16 +23,26 @@ pub struct ClaimTagReward<'info> {
     // field that changes. Write-locking the single per-app `AppAccount` PDA
     // on every claim would needlessly serialize concurrent claims from
     // different stakers/tags against Solana's parallel-execution scheduler.
-    #[account(seeds = [APP_SEED, app.app_id.as_bytes()], bump = app.bump)]
+    #[account(
+        seeds = [
+            APP_SEED,
+            app.app_id.as_bytes(),
+        ],
+        bump = app.bump
+    )]
     pub app: Account<'info, AppAccount>,
     // Not `mut` either: this instruction never touches
     // `app_tag_stake.stake_amount` (or any other field) — `app_tag_stake.app`/
     // `tag`/`bump` are only read, for the ownership check below and for
     // `position`'s seeds/PDA derivation.
     #[account(
-        seeds = [APP_TAG_STAKE_SEED, app_tag_stake.app.as_ref(), app_tag_stake.tag.as_ref()],
+        seeds = [
+            APP_TAG_STAKE_SEED,
+            app_tag_stake.app.as_ref(),
+            app_tag_stake.tag.as_ref(),
+        ],
         bump = app_tag_stake.bump,
-        constraint = app_tag_stake.app == app.key() @ ErrorCode::AppTagStakeMismatch,
+        has_one = app @ ErrorCode::AppTagStakeMismatch,
     )]
     pub app_tag_stake: Account<'info, AppTagStake>,
     // As in `ClaimVoteReward`/`WithdrawTagStake`, a claim can only ever
@@ -42,7 +51,11 @@ pub struct ClaimTagReward<'info> {
     // `user: Signer` re-derivation of this PDA *is* the ownership check.
     #[account(
         mut,
-        seeds = [STAKE_POSITION_SEED, app_tag_stake.key().as_ref(), user.key().as_ref()],
+        seeds = [
+            STAKE_POSITION_SEED,
+            app_tag_stake.key().as_ref(),
+            user.key().as_ref(),
+        ],
         bump = position.bump,
     )]
     pub position: Account<'info, StakePosition>,
@@ -50,10 +63,15 @@ pub struct ClaimTagReward<'info> {
     pub config: Account<'info, Config>,
     #[account(
         mut,
-        address = get_associated_token_address(&config.key(), &config.vote_mint),
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = config,
     )]
     pub vault: Account<'info, TokenAccount>,
-    #[account(mut, token::mint = config.vote_mint)]
+    #[account(
+        mut,
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = user,
+    )]
     pub user_token_account: Account<'info, TokenAccount>,
     pub user: Signer<'info>,
     pub token_program: Program<'info, Token>,

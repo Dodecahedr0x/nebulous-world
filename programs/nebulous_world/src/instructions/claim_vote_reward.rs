@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{Token, TokenAccount};
 
 use crate::constants::{APP_SEED, CONFIG_SEED, VOTE_POSITION_SEED};
@@ -17,7 +16,10 @@ pub struct ClaimVoteReward<'info> {
     // claims from different stakers against Solana's parallel-execution
     // scheduler, on what's expected to be the highest-frequency instruction
     // in this set.
-    #[account(seeds = [APP_SEED, app.app_id.as_bytes()], bump = app.bump)]
+    #[account(
+        seeds = [APP_SEED, app.app_id.as_bytes()],
+        bump = app.bump,
+    )]
     pub app: Account<'info, AppAccount>,
     // As in `WithdrawVote`, a claim can only ever target a position that
     // already exists, so this is a plain `mut` + seeds/bump constraint
@@ -26,7 +28,11 @@ pub struct ClaimVoteReward<'info> {
     // `WithdrawVote`.
     #[account(
         mut,
-        seeds = [VOTE_POSITION_SEED, app.key().as_ref(), user.key().as_ref()],
+        seeds = [
+            VOTE_POSITION_SEED,
+            app.key().as_ref(),
+            user.key().as_ref(),
+        ],
         bump = position.bump,
     )]
     pub position: Account<'info, VotePosition>,
@@ -34,10 +40,15 @@ pub struct ClaimVoteReward<'info> {
     pub config: Account<'info, Config>,
     #[account(
         mut,
-        address = get_associated_token_address(&config.key(), &config.vote_mint),
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = config,
     )]
     pub vault: Account<'info, TokenAccount>,
-    #[account(mut, token::mint = config.vote_mint)]
+    #[account(
+        mut,
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = user,
+    )]
     pub user_token_account: Account<'info, TokenAccount>,
     pub user: Signer<'info>,
     pub token_program: Program<'info, Token>,

@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{APP_SEED, APP_TAG_STAKE_SEED, CONFIG_SEED, STAKE_POSITION_SEED};
@@ -34,16 +33,24 @@ pub struct StakeTag<'info> {
     // closes that gap.
     #[account(
         mut,
-        seeds = [APP_TAG_STAKE_SEED, app_tag_stake.app.as_ref(), app_tag_stake.tag.as_ref()],
+        seeds = [
+            APP_TAG_STAKE_SEED,
+            app_tag_stake.app.as_ref(),
+            app_tag_stake.tag.as_ref(),
+        ],
         bump = app_tag_stake.bump,
-        constraint = app_tag_stake.app == app.key() @ ErrorCode::AppTagStakeMismatch,
+        has_one = app @ ErrorCode::AppTagStakeMismatch,
     )]
     pub app_tag_stake: Account<'info, AppTagStake>,
     #[account(
         init_if_needed,
         payer = user,
         space = 8 + StakePosition::SPACE,
-        seeds = [STAKE_POSITION_SEED, app_tag_stake.key().as_ref(), user.key().as_ref()],
+        seeds = [
+            STAKE_POSITION_SEED,
+            app_tag_stake.key().as_ref(),
+            user.key().as_ref(),
+        ],
         bump,
     )]
     pub position: Account<'info, StakePosition>,
@@ -51,10 +58,15 @@ pub struct StakeTag<'info> {
     pub config: Account<'info, Config>,
     #[account(
         mut,
-        address = get_associated_token_address(&config.key(), &config.vote_mint),
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = config,
     )]
     pub vault: Account<'info, TokenAccount>,
-    #[account(mut, token::mint = config.vote_mint)]
+    #[account(
+        mut,
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = user,
+    )]
     pub user_token_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub user: Signer<'info>,

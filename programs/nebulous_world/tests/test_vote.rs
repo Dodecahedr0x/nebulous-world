@@ -1,294 +1,38 @@
+mod common;
+
 use {
-    anchor_lang::solana_program::{
-        bpf_loader_upgradeable::{self, UpgradeableLoaderState},
-        program_option::COption,
-        program_pack::Pack,
-        pubkey::Pubkey,
-        system_program,
+    common::{
+        create_funded_user, derive_vote_position, fetch_app, fetch_token_amount,
+        fetch_vote_position, fund_token_account, send, set_app_vote_accumulator, setup_with_app,
+        vote_ix, warp_forward,
     },
-    anchor_lang::{solana_program::instruction::Instruction, InstructionData, ToAccountMetas},
-    anchor_spl::associated_token::{get_associated_token_address, ID as ASSOCIATED_TOKEN_PROGRAM_ID},
-    anchor_spl::token::ID as TOKEN_PROGRAM_ID,
-    nebulous_world::constants::{APP_SEED, CONFIG_SEED, REWARD_PRECISION, VOTE_POSITION_SEED},
-    litesvm::LiteSVM,
-    solana_account::Account,
+    nebulous_world::constants::REWARD_PRECISION,
     solana_clock::Clock,
-    solana_keypair::Keypair,
-    solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
-    solana_transaction::versioned::VersionedTransaction,
-    spl_token_interface::state::{Account as SplTokenAccount, AccountState, Mint},
 };
 
-/// See `test_initialize.rs` for context: overwrites the nebulous_world program's
-/// `ProgramData` account so `upgrade_authority` is its recorded upgrade
-/// authority, which is required to call `initialize`.
-fn set_upgrade_authority(
-    svm: &mut LiteSVM,
-    program_id: &Pubkey,
-    upgrade_authority: Pubkey,
-) -> Pubkey {
-    let program_data_address = bpf_loader_upgradeable::get_program_data_address(program_id);
-    let mut account = svm
-        .get_account(&program_data_address)
-        .expect("programdata account must exist (call after add_program)");
-
-    let header = bincode::serialize(&UpgradeableLoaderState::ProgramData {
-        slot: 0,
-        upgrade_authority_address: Some(upgrade_authority),
-    })
-    .unwrap();
-    account.data[..header.len()].copy_from_slice(&header);
-
-    svm.set_account(program_data_address, account).unwrap();
-    program_data_address
-}
-
-/// PDAs for the single global `Config`/vault plus one registered app — there
-/// is exactly one vault for the whole program now (see the design note on
-/// `Config`), so unlike the pre-refactor tests there is nothing app-specific
-/// to derive beyond `app` itself.
-struct Pdas {
-    config: Pubkey,
-    vault: Pubkey,
-    app: Pubkey,
-}
-
-/// Sets up a fresh LiteSVM instance with the nebulous_world program loaded, `Config`
-/// + the single global vault initialized (authority = `deployer`), and a
-/// single `AppAccount` already registered via `init_app`. Returns the SVM,
-/// the deployer keypair, the vote mint, and the relevant PDAs.
-fn setup() -> (LiteSVM, Keypair, Pubkey, Pdas) {
-    let program_id = nebulous_world::id();
-    let deployer = Keypair::new();
-    let mut svm = LiteSVM::new();
-    let bytes = include_bytes!("../../../target/deploy/nebulous_world.so");
-    svm.add_program(program_id, bytes).unwrap();
-    svm.airdrop(&deployer.pubkey(), 1_000_000_000).unwrap();
-
-    let vote_mint = Pubkey::new_unique();
-    let mint = Mint {
-        mint_authority: COption::Some(deployer.pubkey()),
-        supply: 0,
-        decimals: 6,
-        is_initialized: true,
-        freeze_authority: COption::None,
-    };
-    let mut mint_data = vec![0u8; Mint::LEN];
-    Mint::pack(mint, &mut mint_data).unwrap();
-    svm.set_account(
-        vote_mint,
-        Account {
-            lamports: svm.minimum_balance_for_rent_exemption(Mint::LEN),
-            data: mint_data,
-            owner: spl_token_interface::ID,
-            executable: false,
-            rent_epoch: 0,
-        },
-    )
-    .unwrap();
-
-    let program_data = set_upgrade_authority(&mut svm, &program_id, deployer.pubkey());
-    let (config, _bump) = Pubkey::find_program_address(&[CONFIG_SEED], &program_id);
-    let vault = get_associated_token_address(&config, &vote_mint);
-    let initialize_ix = Instruction::new_with_bytes(
-        program_id,
-        &nebulous_world::instruction::Initialize {
-            protocol_fee_bps: 250,
-        }
-        .data(),
-        nebulous_world::accounts::Initialize {
-            config,
-            vault,
-            authority: deployer.pubkey(),
-            vote_mint,
-            program: program_id,
-            program_data,
-            token_program: TOKEN_PROGRAM_ID,
-            associated_token_program: ASSOCIATED_TOKEN_PROGRAM_ID,
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    );
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[initialize_ix], Some(&deployer.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&deployer]).unwrap();
-    svm.send_transaction(tx)
-        .expect("initialize must succeed in test setup");
-
-    let app_id = "cid_vote_test_app_0000001".to_string();
-    let (app, _bump) = Pubkey::find_program_address(&[APP_SEED, app_id.as_bytes()], &program_id);
-    let init_app_ix = Instruction::new_with_bytes(
-        program_id,
-        &nebulous_world::instruction::InitApp {
-            app_id: app_id.clone(),
-            url: "example.com".to_string(),
-        }
-        .data(),
-        nebulous_world::accounts::InitApp {
-            app,
-            payer: deployer.pubkey(),
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    );
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[init_app_ix], Some(&deployer.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&deployer]).unwrap();
-    svm.send_transaction(tx)
-        .expect("init_app must succeed in test setup");
-
-    (svm, deployer, vote_mint, Pdas { config, vault, app })
-}
-
-/// Directly writes a funded, initialized SPL token account owned by `owner`
-/// for `mint`, holding `amount` tokens — bypassing the token program's
-/// `InitializeAccount`/`MintTo` instructions since we only need the end
-/// state, mirroring how `setup()` above fabricates the mint account. Also
-/// used to top up the single global vault directly (owner = `config`),
-/// standing in for a real `fund_app_rewards` call.
-fn fund_token_account(svm: &mut LiteSVM, pubkey: Pubkey, mint: Pubkey, owner: Pubkey, amount: u64) {
-    let token_account = SplTokenAccount {
-        mint,
-        owner,
-        amount,
-        delegate: COption::None,
-        state: AccountState::Initialized,
-        is_native: COption::None,
-        delegated_amount: 0,
-        close_authority: COption::None,
-    };
-    let mut data = vec![0u8; SplTokenAccount::LEN];
-    SplTokenAccount::pack(token_account, &mut data).unwrap();
-    svm.set_account(
-        pubkey,
-        Account {
-            lamports: svm.minimum_balance_for_rent_exemption(SplTokenAccount::LEN),
-            data,
-            owner: spl_token_interface::ID,
-            executable: false,
-            rent_epoch: 0,
-        },
-    )
-    .unwrap();
-}
-
-/// Directly overwrites an already-created `AppAccount`'s
-/// `vote_acc_reward_per_share`, so tests can exercise the reward-payout leg
-/// of `vote()` (normally only nonzero once `fund_app_rewards` has been
-/// called) without needing that instruction. Deserializes the account's
-/// current data, mutates the one field, and re-serializes it (preserving the
-/// Anchor discriminator via `AccountSerialize`) back over the same account,
-/// keeping its existing lamports/owner.
-fn set_app_vote_accumulator(svm: &mut LiteSVM, app: Pubkey, acc_reward_per_share: u128) {
-    let mut raw = svm.get_account(&app).expect("app account must exist");
-    let mut app_account: nebulous_world::AppAccount =
-        anchor_lang::AccountDeserialize::try_deserialize(&mut raw.data.as_slice()).unwrap();
-    app_account.vote_acc_reward_per_share = acc_reward_per_share;
-
-    let mut data = Vec::new();
-    anchor_lang::AccountSerialize::try_serialize(&app_account, &mut data).unwrap();
-    raw.data = data;
-    svm.set_account(app, raw).unwrap();
-}
-
-fn vote_ix(
-    program_id: &Pubkey,
-    pdas: &Pdas,
-    position: &Pubkey,
-    user_token_account: &Pubkey,
-    user: &Pubkey,
-    amount: u64,
-) -> Instruction {
-    Instruction::new_with_bytes(
-        *program_id,
-        &nebulous_world::instruction::Vote { amount }.data(),
-        nebulous_world::accounts::Vote {
-            app: pdas.app,
-            position: *position,
-            config: pdas.config,
-            vault: pdas.vault,
-            user_token_account: *user_token_account,
-            user: *user,
-            token_program: TOKEN_PROGRAM_ID,
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    )
-}
-
-fn fetch_token_amount(svm: &LiteSVM, pubkey: Pubkey) -> u64 {
-    let raw = svm.get_account(&pubkey).expect("token account must exist");
-    SplTokenAccount::unpack(&raw.data).unwrap().amount
-}
-
-fn fetch_position(svm: &LiteSVM, position: Pubkey) -> nebulous_world::VotePosition {
-    let raw = svm
-        .get_account(&position)
-        .expect("position account must exist");
-    anchor_lang::AccountDeserialize::try_deserialize(&mut raw.data.as_slice()).unwrap()
-}
-
-/// Advances the LiteSVM instance's on-chain clock by `seconds` — LiteSVM's
-/// clock is otherwise frozen at its initial value, which would never
-/// exercise the linearly-decaying unstake fee's time dependency (see
-/// `unstake_fee.rs`) or `staked_at`'s weighted-average top-up behavior.
-fn warp_forward(svm: &mut LiteSVM, seconds: i64) {
-    let mut clock = svm.get_sysvar::<Clock>();
-    clock.unix_timestamp += seconds;
-    svm.set_sysvar::<Clock>(&clock);
-}
+const APP_ID: &str = "cid_vote_test_app_0000001";
 
 #[test]
 fn test_vote_locks_principal_and_creates_position() {
-    let program_id = nebulous_world::id();
-    let (mut svm, _deployer, vote_mint, pdas) = setup();
-
-    let user = Keypair::new();
-    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
-
-    let user_token_account = Pubkey::new_unique();
-    fund_token_account(
-        &mut svm,
-        user_token_account,
-        vote_mint,
-        user.pubkey(),
-        10_000,
-    );
-
-    let (position, _bump) = Pubkey::find_program_address(
-        &[
-            VOTE_POSITION_SEED,
-            pdas.app.as_ref(),
-            user.pubkey().as_ref(),
-        ],
-        &program_id,
-    );
+    let (mut svm, _deployer, env, app) = setup_with_app(APP_ID);
+    let (user, user_token_account) = create_funded_user(&mut svm, &env, 10_000);
+    let position = derive_vote_position(&env.program_id, &app, &user.pubkey());
 
     let amount = 4_000u64;
-    let instruction = vote_ix(
-        &program_id,
-        &pdas,
+    let ix = vote_ix(
+        &env,
+        &app,
         &position,
         &user_token_account,
         &user.pubkey(),
         amount,
     );
-
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[instruction], Some(&user.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&user]).unwrap();
-    let res = svm.send_transaction(tx);
-    assert!(res.is_ok(), "vote transaction failed: {:?}", res);
+    send(&mut svm, ix, &user.pubkey(), &[&user]).expect("vote transaction failed");
 
     // The position was created with the right app/owner/amount/reward_debt.
-    let position_raw = svm
-        .get_account(&position)
-        .expect("position account must exist");
-    let position_account: nebulous_world::VotePosition =
-        anchor_lang::AccountDeserialize::try_deserialize(&mut position_raw.data.as_slice())
-            .unwrap();
-    assert_eq!(position_account.app, pdas.app);
+    let position_account = fetch_vote_position(&svm, position);
+    assert_eq!(position_account.app, app);
     assert_eq!(position_account.owner, user.pubkey());
     assert_eq!(position_account.amount, amount);
     // No rewards were ever funded, so the accumulator is still 0 and the
@@ -304,14 +48,11 @@ fn test_vote_locks_principal_and_creates_position() {
     );
 
     // The app's total_vote_stake reflects the new stake.
-    let app_raw = svm.get_account(&pdas.app).expect("app account must exist");
-    let app_account: nebulous_world::AppAccount =
-        anchor_lang::AccountDeserialize::try_deserialize(&mut app_raw.data.as_slice()).unwrap();
-    assert_eq!(app_account.total_vote_stake, amount);
+    assert_eq!(fetch_app(&svm, app).total_vote_stake, amount);
 
     // Tokens actually moved: the single global vault gained `amount`, user
     // lost `amount`.
-    assert_eq!(fetch_token_amount(&svm, pdas.vault), amount);
+    assert_eq!(fetch_token_amount(&svm, env.vault), amount);
     assert_eq!(
         fetch_token_amount(&svm, user_token_account),
         10_000 - amount
@@ -320,103 +61,45 @@ fn test_vote_locks_principal_and_creates_position() {
 
 #[test]
 fn test_vote_rejects_zero_amount() {
-    let program_id = nebulous_world::id();
-    let (mut svm, _deployer, vote_mint, pdas) = setup();
+    let (mut svm, _deployer, env, app) = setup_with_app(APP_ID);
+    let (user, user_token_account) = create_funded_user(&mut svm, &env, 10_000);
+    let position = derive_vote_position(&env.program_id, &app, &user.pubkey());
 
-    let user = Keypair::new();
-    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
-
-    let user_token_account = Pubkey::new_unique();
-    fund_token_account(
-        &mut svm,
-        user_token_account,
-        vote_mint,
-        user.pubkey(),
-        10_000,
-    );
-
-    let (position, _bump) = Pubkey::find_program_address(
-        &[
-            VOTE_POSITION_SEED,
-            pdas.app.as_ref(),
-            user.pubkey().as_ref(),
-        ],
-        &program_id,
-    );
-
-    let instruction = vote_ix(
-        &program_id,
-        &pdas,
+    let ix = vote_ix(
+        &env,
+        &app,
         &position,
         &user_token_account,
         &user.pubkey(),
         0,
     );
 
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[instruction], Some(&user.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&user]).unwrap();
-    let res = svm.send_transaction(tx);
     assert!(
-        res.is_err(),
+        send(&mut svm, ix, &user.pubkey(), &[&user]).is_err(),
         "expected vote to reject a zero amount, but it succeeded"
     );
 }
 
 #[test]
 fn test_vote_accumulates_across_two_deposits() {
-    let program_id = nebulous_world::id();
-    let (mut svm, _deployer, vote_mint, pdas) = setup();
-
-    let user = Keypair::new();
-    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
-
-    let user_token_account = Pubkey::new_unique();
-    fund_token_account(
-        &mut svm,
-        user_token_account,
-        vote_mint,
-        user.pubkey(),
-        10_000,
-    );
-
-    let (position, _bump) = Pubkey::find_program_address(
-        &[
-            VOTE_POSITION_SEED,
-            pdas.app.as_ref(),
-            user.pubkey().as_ref(),
-        ],
-        &program_id,
-    );
+    let (mut svm, _deployer, env, app) = setup_with_app(APP_ID);
+    let (user, user_token_account) = create_funded_user(&mut svm, &env, 10_000);
+    let position = derive_vote_position(&env.program_id, &app, &user.pubkey());
 
     for amount in [1_000u64, 2_500u64] {
-        let instruction = vote_ix(
-            &program_id,
-            &pdas,
+        let ix = vote_ix(
+            &env,
+            &app,
             &position,
             &user_token_account,
             &user.pubkey(),
             amount,
         );
-        let blockhash = svm.latest_blockhash();
-        let msg = Message::new_with_blockhash(&[instruction], Some(&user.pubkey()), &blockhash);
-        let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&user]).unwrap();
-        let res = svm.send_transaction(tx);
-        assert!(res.is_ok(), "vote transaction failed: {:?}", res);
+        send(&mut svm, ix, &user.pubkey(), &[&user]).expect("vote transaction failed");
     }
 
-    let position_raw = svm
-        .get_account(&position)
-        .expect("position account must exist");
-    let position_account: nebulous_world::VotePosition =
-        anchor_lang::AccountDeserialize::try_deserialize(&mut position_raw.data.as_slice())
-            .unwrap();
-    assert_eq!(position_account.amount, 3_500);
-
-    let app_raw = svm.get_account(&pdas.app).expect("app account must exist");
-    let app_account: nebulous_world::AppAccount =
-        anchor_lang::AccountDeserialize::try_deserialize(&mut app_raw.data.as_slice()).unwrap();
-    assert_eq!(app_account.total_vote_stake, 3_500);
+    assert_eq!(fetch_vote_position(&svm, position).amount, 3_500);
+    assert_eq!(fetch_app(&svm, app).total_vote_stake, 3_500);
 }
 
 /// Exercises the reward-payout CPI leg of `vote()` end-to-end — the
@@ -437,59 +120,35 @@ fn test_vote_accumulates_across_two_deposits() {
 /// principal balance already sitting in `vault` from the first vote.
 #[test]
 fn test_vote_pays_out_pending_reward_on_second_vote() {
-    let program_id = nebulous_world::id();
-    let (mut svm, _deployer, vote_mint, pdas) = setup();
-
-    let user = Keypair::new();
-    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
-
-    let user_token_account = Pubkey::new_unique();
-    fund_token_account(
-        &mut svm,
-        user_token_account,
-        vote_mint,
-        user.pubkey(),
-        10_000,
-    );
-
-    let (position, _bump) = Pubkey::find_program_address(
-        &[
-            VOTE_POSITION_SEED,
-            pdas.app.as_ref(),
-            user.pubkey().as_ref(),
-        ],
-        &program_id,
-    );
+    let (mut svm, _deployer, env, app) = setup_with_app(APP_ID);
+    let (user, user_token_account) = create_funded_user(&mut svm, &env, 10_000);
+    let position = derive_vote_position(&env.program_id, &app, &user.pubkey());
 
     // First vote: creates the position at amount=1_000 with reward_debt=0
     // (accumulator is still 0 at this point).
     let first_amount = 1_000u64;
-    let first_ix = vote_ix(
-        &program_id,
-        &pdas,
+    let ix = vote_ix(
+        &env,
+        &app,
         &position,
         &user_token_account,
         &user.pubkey(),
         first_amount,
     );
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[first_ix], Some(&user.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&user]).unwrap();
-    svm.send_transaction(tx)
-        .expect("first vote must succeed in test setup");
+    send(&mut svm, ix, &user.pubkey(), &[&user]).expect("first vote must succeed in test setup");
 
     // Stand in for `fund_app_rewards`: bump the accumulator to 1 reward
     // token per staked token, and top up the vault (which already holds
     // `first_amount` in principal from the vote above) with extra balance so
     // the payout CPI has something to actually transfer.
     let acc_reward_per_share = REWARD_PRECISION; // 1.0 reward token per staked token
-    set_app_vote_accumulator(&mut svm, pdas.app, acc_reward_per_share);
+    set_app_vote_accumulator(&mut svm, app, acc_reward_per_share);
     let reward_topup = 50_000u64;
     fund_token_account(
         &mut svm,
-        pdas.vault,
-        vote_mint,
-        pdas.config,
+        env.vault,
+        env.vote_mint,
+        env.config,
         first_amount + reward_topup,
     );
 
@@ -497,40 +156,27 @@ fn test_vote_pays_out_pending_reward_on_second_vote() {
     let expected_pending = 1_000u64;
 
     let second_amount = 500u64;
-    let second_ix = vote_ix(
-        &program_id,
-        &pdas,
+    let ix = vote_ix(
+        &env,
+        &app,
         &position,
         &user_token_account,
         &user.pubkey(),
         second_amount,
     );
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[second_ix], Some(&user.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&user]).unwrap();
-    let res = svm.send_transaction(tx);
-    assert!(res.is_ok(), "second vote transaction failed: {:?}", res);
+    send(&mut svm, ix, &user.pubkey(), &[&user]).expect("second vote transaction failed");
 
     // The position grew by `second_amount` and checkpointed against the new
     // accumulator: reward_debt_for(1_500, 1*PRECISION) = 1_500.
-    let position_raw = svm
-        .get_account(&position)
-        .expect("position account must exist");
-    let position_account: nebulous_world::VotePosition =
-        anchor_lang::AccountDeserialize::try_deserialize(&mut position_raw.data.as_slice())
-            .unwrap();
+    let position_account = fetch_vote_position(&svm, position);
     assert_eq!(position_account.amount, first_amount + second_amount);
     assert_eq!(position_account.reward_debt, 1_500);
 
     // The reward actually landed in the user's wallet: started with 10_000,
     // paid `first_amount` + `second_amount` in principal, received
     // `expected_pending` back as reward.
-    let user_raw = svm
-        .get_account(&user_token_account)
-        .expect("user token account must exist");
-    let user_account = SplTokenAccount::unpack(&user_raw.data).unwrap();
     assert_eq!(
-        user_account.amount,
+        fetch_token_amount(&svm, user_token_account),
         10_000 - first_amount - second_amount + expected_pending
     );
 
@@ -538,7 +184,7 @@ fn test_vote_pays_out_pending_reward_on_second_vote() {
     // this instruction, paid out `expected_pending`, then received
     // `second_amount` of fresh principal.
     assert_eq!(
-        fetch_token_amount(&svm, pdas.vault),
+        fetch_token_amount(&svm, env.vault),
         first_amount + reward_topup - expected_pending + second_amount
     );
 }
@@ -553,39 +199,38 @@ fn test_vote_pays_out_pending_reward_on_second_vote() {
 /// immediately fee-free.
 #[test]
 fn test_vote_staked_at_is_a_weighted_average_across_deposits() {
-    let program_id = nebulous_world::id();
-    let (mut svm, _deployer, vote_mint, pdas) = setup();
-
-    let user = Keypair::new();
-    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
-    let user_token_account = Pubkey::new_unique();
-    fund_token_account(&mut svm, user_token_account, vote_mint, user.pubkey(), 1_000_100);
-
-    let (position, _bump) = Pubkey::find_program_address(
-        &[VOTE_POSITION_SEED, pdas.app.as_ref(), user.pubkey().as_ref()],
-        &program_id,
-    );
+    let (mut svm, _deployer, env, app) = setup_with_app(APP_ID);
+    let (user, user_token_account) = create_funded_user(&mut svm, &env, 1_000_100);
+    let position = derive_vote_position(&env.program_id, &app, &user.pubkey());
 
     // A tiny first deposit...
     let first_amount = 100u64;
-    let first_ix = vote_ix(&program_id, &pdas, &position, &user_token_account, &user.pubkey(), first_amount);
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[first_ix], Some(&user.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&user]).unwrap();
-    svm.send_transaction(tx).expect("first vote must succeed");
-    let staked_at_after_first = fetch_position(&svm, position).staked_at;
+    let ix = vote_ix(
+        &env,
+        &app,
+        &position,
+        &user_token_account,
+        &user.pubkey(),
+        first_amount,
+    );
+    send(&mut svm, ix, &user.pubkey(), &[&user]).expect("first vote must succeed");
+    let staked_at_after_first = fetch_vote_position(&svm, position).staked_at;
 
     // ...then, a week later, a much larger top-up.
     let elapsed = 7 * 24 * 60 * 60;
     warp_forward(&mut svm, elapsed);
     let second_amount = 1_000_000u64;
-    let second_ix = vote_ix(&program_id, &pdas, &position, &user_token_account, &user.pubkey(), second_amount);
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[second_ix], Some(&user.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&user]).unwrap();
-    svm.send_transaction(tx).expect("second vote must succeed");
+    let ix = vote_ix(
+        &env,
+        &app,
+        &position,
+        &user_token_account,
+        &user.pubkey(),
+        second_amount,
+    );
+    send(&mut svm, ix, &user.pubkey(), &[&user]).expect("second vote must succeed");
 
-    let position_account = fetch_position(&svm, position);
+    let position_account = fetch_vote_position(&svm, position);
     assert_eq!(position_account.amount, first_amount + second_amount);
 
     let expected_staked_at = nebulous_world::unstake_fee::weighted_avg_timestamp(

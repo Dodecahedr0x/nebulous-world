@@ -11,12 +11,17 @@ use crate::state::StakePosition;
 pub struct CloseTagStakePosition<'info> {
     #[account(
         mut,
-        seeds = [STAKE_POSITION_SEED, position.app_tag_stake.as_ref(), user.key().as_ref()],
+        seeds = [
+            STAKE_POSITION_SEED,
+            position.app_tag_stake.as_ref(),
+            user.key().as_ref(),
+        ],
         bump = position.bump,
         close = payer,
+        has_one = payer,
     )]
     pub position: Account<'info, StakePosition>,
-    #[account(mut, address = position.payer @ ErrorCode::PayerMismatch)]
+    #[account(mut)]
     pub payer: SystemAccount<'info>,
     pub user: Signer<'info>,
 }

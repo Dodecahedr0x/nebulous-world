@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{Token, TokenAccount};
 
 use crate::constants::{APP_SEED, APP_TAG_STAKE_SEED, CONFIG_SEED, STAKE_POSITION_SEED};
@@ -14,7 +13,14 @@ use crate::unstake_fee::{linear_decay_fee_bps, unstake_fee};
 /// different PDA signers for two different vaults.
 #[derive(Accounts)]
 pub struct WithdrawTagStake<'info> {
-    #[account(mut, seeds = [APP_SEED, app.app_id.as_bytes()], bump = app.bump)]
+    #[account(
+        mut,
+        seeds = [
+            APP_SEED,
+            app.app_id.as_bytes()
+        ],
+        bump = app.bump,
+    )]
     pub app: Account<'info, AppAccount>,
     // See `StakeTag::app_tag_stake`'s doc comment for why the trailing
     // `constraint =` is required: the seeds/bump constraint alone only
@@ -22,9 +28,13 @@ pub struct WithdrawTagStake<'info> {
     // belongs to the specific `app` passed alongside it in this instruction.
     #[account(
         mut,
-        seeds = [APP_TAG_STAKE_SEED, app_tag_stake.app.as_ref(), app_tag_stake.tag.as_ref()],
+        seeds = [
+            APP_TAG_STAKE_SEED,
+            app_tag_stake.app.as_ref(),
+            app_tag_stake.tag.as_ref(),
+        ],
         bump = app_tag_stake.bump,
-        constraint = app_tag_stake.app == app.key() @ ErrorCode::AppTagStakeMismatch,
+        has_one = app @ ErrorCode::AppTagStakeMismatch,
     )]
     pub app_tag_stake: Account<'info, AppTagStake>,
     // As in `WithdrawVote`, a withdrawal can only ever target a position
@@ -33,7 +43,11 @@ pub struct WithdrawTagStake<'info> {
     // of this PDA *is* the ownership check.
     #[account(
         mut,
-        seeds = [STAKE_POSITION_SEED, app_tag_stake.key().as_ref(), user.key().as_ref()],
+        seeds = [
+            STAKE_POSITION_SEED,
+            app_tag_stake.key().as_ref(),
+            user.key().as_ref(),
+        ],
         bump = position.bump,
     )]
     pub position: Account<'info, StakePosition>,
@@ -41,10 +55,14 @@ pub struct WithdrawTagStake<'info> {
     pub config: Account<'info, Config>,
     #[account(
         mut,
-        address = get_associated_token_address(&config.key(), &config.vote_mint),
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = config,
     )]
     pub vault: Account<'info, TokenAccount>,
-    #[account(mut, token::mint = config.vote_mint)]
+    #[account(mut,
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = user,
+    )]
     pub user_token_account: Account<'info, TokenAccount>,
     /// The admin's own token account — see `WithdrawVote::admin_token_account`'s
     /// doc comment, same constraints and same reasoning. Boxed for the same
@@ -53,8 +71,8 @@ pub struct WithdrawTagStake<'info> {
     /// `try_accounts` over SBF's 4096-byte stack frame limit without it.
     #[account(
         mut,
-        address = get_associated_token_address(&config.authority, &config.vote_mint),
-        token::mint = config.vote_mint,
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = config.authority,
     )]
     pub admin_token_account: Box<Account<'info, TokenAccount>>,
     pub user: Signer<'info>,

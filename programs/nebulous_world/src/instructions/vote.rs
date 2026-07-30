@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{APP_SEED, CONFIG_SEED, VOTE_POSITION_SEED};
@@ -27,7 +26,8 @@ pub struct Vote<'info> {
     /// directly, so no separate `vote_mint` account needs to be passed in.
     #[account(
         mut,
-        address = get_associated_token_address(&config.key(), &config.vote_mint),
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = config,
     )]
     pub vault: Account<'info, TokenAccount>,
     /// `token::mint =` isn't independently load-bearing — the SPL Token
@@ -39,7 +39,11 @@ pub struct Vote<'info> {
     /// account in this program (`withdraw_vote`, `stake_tag`,
     /// `withdraw_tag_stake`, `claim_vote_reward`, `claim_tag_reward`,
     /// `fund_app_rewards`).
-    #[account(mut, token::mint = config.vote_mint)]
+    #[account(
+        mut,
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = user,
+    )]
     pub user_token_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub user: Signer<'info>,

@@ -14,9 +14,14 @@ pub struct CloseVotePosition<'info> {
     // transaction (Solana's ~1232-byte tx size limit).
     #[account(
         mut,
-        seeds = [VOTE_POSITION_SEED, position.app.as_ref(), user.key().as_ref()],
+        seeds = [
+            VOTE_POSITION_SEED,
+            position.app.as_ref(),
+            user.key().as_ref(),
+        ],
         bump = position.bump,
         close = payer,
+        has_one = payer,
     )]
     pub position: Account<'info, VotePosition>,
     /// The account that originally paid this position's rent (stored on
@@ -26,7 +31,7 @@ pub struct CloseVotePosition<'info> {
     /// redirect somebody else's rent refund to itself. Doesn't need to
     /// sign: receiving lamports back requires no authorization from the
     /// receiver.
-    #[account(mut, address = position.payer @ ErrorCode::PayerMismatch)]
+    #[account(mut)]
     pub payer: SystemAccount<'info>,
     // The single `user: Signer` re-derivation of `position`'s PDA above IS
     // the ownership check — same pattern as `WithdrawVote`/`ClaimVoteReward`.

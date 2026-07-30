@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{Token, TokenAccount};
 
 use crate::constants::{APP_SEED, CONFIG_SEED, VOTE_POSITION_SEED};
@@ -10,7 +9,14 @@ use crate::unstake_fee::{linear_decay_fee_bps, unstake_fee};
 
 #[derive(Accounts)]
 pub struct WithdrawVote<'info> {
-    #[account(mut, seeds = [APP_SEED, app.app_id.as_bytes()], bump = app.bump)]
+    #[account(
+        mut,
+        seeds = [
+            APP_SEED,
+            app.app_id.as_bytes()
+        ],
+        bump = app.bump,
+    )]
     pub app: Account<'info, AppAccount>,
     // Unlike `Vote`'s `position` (which is `init_if_needed` — a vote may be
     // the very first one for this user/app pair), a withdrawal can only ever
@@ -25,7 +31,11 @@ pub struct WithdrawVote<'info> {
     // check.
     #[account(
         mut,
-        seeds = [VOTE_POSITION_SEED, app.key().as_ref(), user.key().as_ref()],
+        seeds = [
+            VOTE_POSITION_SEED,
+            app.key().as_ref(),
+            user.key().as_ref(),
+        ],
         bump = position.bump,
     )]
     pub position: Account<'info, VotePosition>,
@@ -33,10 +43,14 @@ pub struct WithdrawVote<'info> {
     pub config: Account<'info, Config>,
     #[account(
         mut,
-        address = get_associated_token_address(&config.key(), &config.vote_mint),
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = config,
     )]
     pub vault: Account<'info, TokenAccount>,
-    #[account(mut, token::mint = config.vote_mint)]
+    #[account(mut,
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = user,
+    )]
     pub user_token_account: Account<'info, TokenAccount>,
     /// The admin's own token account (an ATA for `config.authority`) —
     /// where the unstake fee is paid directly, see the handler's doc
@@ -54,8 +68,8 @@ pub struct WithdrawVote<'info> {
     /// because `WithdrawVote` alone is currently over the limit.
     #[account(
         mut,
-        address = get_associated_token_address(&config.authority, &config.vote_mint),
-        token::mint = config.vote_mint,
+        associated_token::mint = config.vote_mint,
+        associated_token::authority = config.authority,
     )]
     pub admin_token_account: Box<Account<'info, TokenAccount>>,
     pub user: Signer<'info>,

@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{APP_SEED, CONFIG_SEED};
@@ -21,13 +20,25 @@ use crate::state::{AppAccount, Config, RewardPool};
 /// deposit.
 #[derive(Accounts)]
 pub struct FundAppRewards<'info> {
-    #[account(mut, seeds = [APP_SEED, app.app_id.as_bytes()], bump = app.bump)]
+    #[account(
+        mut,
+        seeds = [
+            APP_SEED,
+            app.app_id.as_bytes()
+        ],
+        bump = app.bump
+    )]
     pub app: Account<'info, AppAccount>,
-    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = authority @ ErrorCode::Unauthorized)]
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        has_one = authority,
+    )]
     pub config: Account<'info, Config>,
     #[account(
         mut,
-        address = get_associated_token_address(&config.key(), &config.vote_mint),
+        token::mint = config.vote_mint,
+        token::authority = config,
     )]
     pub vault: Account<'info, TokenAccount>,
     #[account(mut, token::mint = config.vote_mint)]
