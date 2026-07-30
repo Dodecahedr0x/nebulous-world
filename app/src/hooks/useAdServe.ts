@@ -13,9 +13,8 @@ export interface ServedAd {
 /**
  * Requests a sponsored ad for `appId` (recording a revenue-bearing
  * impression) and reports clicks. Re-requests whenever `appId` changes —
- * shared by AdCard (whose appId can change as the underlying grid
- * paginates/filters) and AdSlot (whose appId is static for the page's
- * lifetime, so this degrades to a one-shot request there).
+ * for AdSlot the appId is static for the page's lifetime, so this degrades
+ * to a one-shot request there.
  */
 export function useAdServe(appId: string) {
   const [ad, setAd] = useState<ServedAd | null>(null);

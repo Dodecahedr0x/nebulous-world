@@ -2,8 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { AppCard } from "@/components/AppCard";
-import { AdCard } from "@/components/ads/AdCard";
-import { interleaveAds } from "@/lib/adPlacement";
 import type { AppDTO } from "@/lib/types";
 
 export interface MapSelection {
@@ -83,20 +81,16 @@ export function RelatedApps({
           <p className="text-sm text-slate">No approved apps match this selection yet.</p>
         ) : (
           <div className="animate-fade-in grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {interleaveAds(apps).map((entry) =>
-              entry.kind === "ad" ? (
-                <AdCard key={entry.key} appId={entry.appId} />
-              ) : (
-                <div key={entry.app.id} className="relative">
-                  {entry.app.slug === selection.selectedSlug && (
-                    <span className="absolute -left-2 -top-2 z-10 rounded-full bg-violet px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-cream">
-                      Selected
-                    </span>
-                  )}
-                  <AppCard app={entry.app} />
-                </div>
-              ),
-            )}
+            {apps.map((app) => (
+              <div key={app.id} className="relative">
+                {app.slug === selection.selectedSlug && (
+                  <span className="absolute -left-2 -top-2 z-10 rounded-full bg-violet px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-cream">
+                    Selected
+                  </span>
+                )}
+                <AppCard app={app} />
+              </div>
+            ))}
           </div>
         )}
       </div>

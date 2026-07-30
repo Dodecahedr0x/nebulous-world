@@ -43,9 +43,6 @@ export const SORT_OPTIONS = [
   { value: "new", label: "Newest" },
 ] as const;
 
-/** In any grid/list of apps, show one sponsored AdCard after every N app cards. */
-export const AD_EVERY_N_APPS = 6;
-
 /** Human-readable token symbol for the vote/stake/sale token. */
 export const TOKEN_SYMBOL = "NEB";
 
