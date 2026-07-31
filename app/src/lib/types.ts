@@ -125,3 +125,70 @@ export interface FindConfirmInput {
   visitorId: string;
   sessionId: string;
 }
+
+// The staker digest — "since you were last here" (see
+// docs/plans/2026-08-01-staker-digest-design.md). Computed entirely in the
+// indexer (indexer/src/handlers/digest.rs); this app only proxies and
+// renders it. `kind` is the discriminant, and the item array's order IS the
+// render order: rewards, then rank moves, then streak.
+
+/** An app with claimable (distributed, unclaimed) revenue. Outstanding
+    state, NOT watermark-filtered — money you didn't claim yesterday is
+    still money today, so opening the panel must never make it vanish. */
+export interface DigestRewardItem {
+  kind: "reward";
+  appId: string;
+  appSlug: string;
+  appName: string;
+  appIconUrl: string | null;
+  /** Already in whole-token units — render with `formatToken` directly, do
+      NOT scale by voteTokenDecimals. This comes from `RevenueClaim.amount`,
+      a DOUBLE PRECISION accounting column, and follows the same convention
+      as /rewards/positions' `amount` (cf. MyStakes' `stakedAmount`). The
+      decimal-string rule in lib/indexerClient.ts's header applies only to
+      raw on-chain u64/u128 values read off an account — a different path
+      entirely (cf. MyStakes' `position.amount`, which does get scaled). */
+  amount: number;
+  /** How many settled epochs were rolled into `amount`. */
+  epochCount: number;
+}
+
+/** A staked app whose leaderboard POSITION moved since `seenAt`. Down-moves
+    are included on purpose. `delta` is signed and positive means "moved up"
+    (i.e. `from` - `to`), so a move from #7 to #4 is delta 3. */
+export interface DigestRankMoveItem {
+  kind: "rank_move";
+  appId: string;
+  appSlug: string;
+  appName: string;
+  appIconUrl: string | null;
+  from: number;
+  to: number;
+  delta: number;
+}
+
+/** Daily-bonus streak status. `bonusClaimedToday` is derived from
+    `lastXpDate == today` — the bonus is auto-awarded by any qualifying
+    action, there is nothing for the user to click. */
+export interface DigestStreakItem {
+  kind: "streak";
+  streakDays: number;
+  bestDays: number;
+  bonusClaimedToday: boolean;
+}
+
+export type DigestItem = DigestRewardItem | DigestRankMoveItem | DigestStreakItem;
+
+export interface DigestDTO {
+  /** ISO-8601 watermark of the last panel open, or null if never opened. */
+  seenAt: string | null;
+  /** Badge number: reward rows + rank-move rows + the streak row only when
+      `bonusClaimedToday` is false. Deliberately not `items.length`. */
+  count: number;
+  items: DigestItem[];
+}
+
+/** POST /digest/seen's response — the freshly-advanced watermark. */
+export interface DigestSeenResult {
+  seenAt: string;
+}

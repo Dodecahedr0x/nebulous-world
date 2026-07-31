@@ -3,6 +3,11 @@ mod backfill;
 mod config;
 mod crawler;
 mod db;
+/// The staker digest's live-Postgres tier — same harness, same env var and
+/// same `#[ignore]` discipline as `find_integration` (whose helpers it
+/// reuses).
+#[cfg(test)]
+mod digest_integration;
 mod dlmm_bridge;
 mod find;
 /// The live-Postgres tier for `/find` (A77). `#[cfg(test)]` so it adds no

@@ -102,6 +102,86 @@ async fn record_event(
     Ok(inserted)
 }
 
+/// The streak transition `award`'s UPDATE performs, in pure form — same
+/// three rules, no database: a qualifying action the day after the last one
+/// extends the run, any other gap restarts it at 1, and the personal best
+/// only ever ratchets upward. `None` means "nothing to write" (today is
+/// already recorded), mirroring that UPDATE's
+/// `lastXpDate IS DISTINCT FROM today` guard.
+///
+/// Kept in sync with that SQL by hand, and pinned from both ends: the unit
+/// tests below fix the intended transitions, and
+/// `digest_integration::streak_*` runs the real statement against a real
+/// Postgres and asserts it lands on the same numbers.
+/// `#[cfg(test)]` because production never calls it — the SQL is the only
+/// implementation that runs; this is its executable specification.
+#[cfg(test)]
+fn next_streak(
+    last_xp_date: Option<chrono::NaiveDate>,
+    today: chrono::NaiveDate,
+    streak_days: i32,
+    streak_best_days: i32,
+) -> Option<(i32, i32)> {
+    if last_xp_date == Some(today) {
+        return None;
+    }
+    let days = if last_xp_date == Some(today - chrono::Duration::days(1)) {
+        streak_days + 1
+    } else {
+        1
+    };
+    Some((days, streak_best_days.max(days)))
+}
+
+/// Stamps `lastXpDate` and advances the streak in ONE statement (see
+/// docs/plans/2026-08-01-staker-digest-design.md): `award` already knows
+/// "this user did a qualifying thing today" and already owns the
+/// once-per-UTC-day boundary, so there is no second place that could
+/// disagree about what day it is or double-count a day.
+///
+/// `lastXpDate IS DISTINCT FROM $2` makes the whole statement a no-op once
+/// today is already recorded. That guard is load-bearing, not decoration:
+/// the `daily_bonus` insert in `award` can legitimately LOSE the
+/// `ON CONFLICT` race (its result is deliberately ignored — the unique index,
+/// not the `lastXpDate` read, is the correctness boundary), and without the
+/// guard the loser would re-evaluate the CASE against an already-advanced
+/// `lastXpDate`, see "not yesterday", and reset a live streak to 1. With it,
+/// whichever call gets there second changes nothing.
+///
+/// The CASE is repeated inside `GREATEST` rather than referencing
+/// `"streakDays"`: within one UPDATE every right-hand column reference reads
+/// the row's OLD value, so `GREATEST("streakBestDays", "streakDays")` would
+/// ratchet the best against yesterday's count instead of today's.
+///
+/// `pub(crate)` only so the live-database test tier can run the real
+/// statement twice and prove that second call is inert
+/// (`digest_integration.rs`); nothing outside `award` should call it.
+pub(crate) async fn mark_day_earned(
+    pool: &PgPool,
+    user_id: &str,
+    today: chrono::NaiveDate,
+) -> Result<(), sqlx::Error> {
+    let yesterday = today - chrono::Duration::days(1);
+    sqlx::query(
+        r#"
+        UPDATE "User" SET
+            "lastXpDate" = $2,
+            "streakDays" = CASE WHEN "lastXpDate" = $3 THEN "streakDays" + 1 ELSE 1 END,
+            "streakBestDays" = GREATEST(
+                "streakBestDays",
+                CASE WHEN "lastXpDate" = $3 THEN "streakDays" + 1 ELSE 1 END
+            )
+        WHERE id = $1 AND "lastXpDate" IS DISTINCT FROM $2
+        "#,
+    )
+    .bind(user_id)
+    .bind(today)
+    .bind(yesterday)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Awards XP for a fresh (wallet, kind) action today, plus the once-per-
 /// UTC-day bonus if this wallet hasn't earned XP yet today. Best-effort by
 /// design — callers log and swallow errors rather than failing the
@@ -137,11 +217,7 @@ pub async fn award(
         // lastXpDate read/write above remains a pure optimization to skip
         // the common case, not the correctness boundary.
         record_event(pool, user_id, "daily_bonus", None, XP_DAILY_BONUS, now).await?;
-        sqlx::query(r#"UPDATE "User" SET "lastXpDate" = $2 WHERE id = $1"#)
-            .bind(user_id)
-            .bind(today)
-            .execute(pool)
-            .await?;
+        mark_day_earned(pool, user_id, today).await?;
     }
 
     Ok(())
@@ -447,6 +523,45 @@ mod curve_tests {
         assert_eq!(level_for_xp(100), 2);
         assert_eq!(level_for_xp(299), 2);
         assert_eq!(level_for_xp(300), 3);
+    }
+
+    fn day(n: i64) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date") + chrono::Duration::days(n)
+    }
+
+    #[test]
+    fn the_first_ever_qualifying_day_starts_a_streak_of_one() {
+        assert_eq!(next_streak(None, day(0), 0, 0), Some((1, 1)));
+    }
+
+    #[test]
+    fn a_consecutive_day_extends_the_streak() {
+        assert_eq!(next_streak(Some(day(0)), day(1), 4, 9), Some((5, 9)));
+    }
+
+    #[test]
+    fn a_gap_of_one_day_restarts_the_streak_at_one() {
+        assert_eq!(next_streak(Some(day(0)), day(2), 4, 9), Some((1, 9)));
+    }
+
+    #[test]
+    fn a_gap_of_many_days_restarts_the_streak_at_one() {
+        assert_eq!(next_streak(Some(day(0)), day(90), 40, 40), Some((1, 40)));
+    }
+
+    #[test]
+    fn the_personal_best_ratchets_when_the_streak_passes_it() {
+        assert_eq!(next_streak(Some(day(0)), day(1), 9, 9), Some((10, 10)));
+    }
+
+    #[test]
+    fn the_personal_best_never_falls_when_a_streak_breaks() {
+        assert_eq!(next_streak(Some(day(0)), day(5), 3, 12), Some((1, 12)));
+    }
+
+    #[test]
+    fn a_second_award_on_the_same_day_changes_nothing() {
+        assert_eq!(next_streak(Some(day(1)), day(1), 5, 9), None);
     }
 
     #[test]

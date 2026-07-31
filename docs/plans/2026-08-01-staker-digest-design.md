@@ -70,8 +70,7 @@ This is the interface both workstreams build against.
   "count": 3,                        // badge number, see below
   "items": [
     { "kind": "reward",    "appId": "…", "appSlug": "jupiter", "appName": "Jupiter",
-      "appIconUrl": "…", "amount": <same serialization as /rewards/positions>,
-      "epochCount": 2 },
+      "appIconUrl": "…", "amount": 12.5, "epochCount": 2 },
     { "kind": "rank_move", "appId": "…", "appSlug": "…", "appName": "…",
       "appIconUrl": "…", "from": 7, "to": 4, "delta": 3 },
     { "kind": "streak",    "streakDays": 5, "bestDays": 9,
@@ -81,9 +80,15 @@ This is the interface both workstreams build against.
 ```
 
 Item order in the array is the render order: rewards, then rank moves, then
-streak. `amount` follows whatever `RevenueEpoch` actually stores and matches
-`/rewards/positions`' existing serialization convention exactly — u64/u128 go
-end-to-end as decimal strings, never JS numbers.
+streak.
+
+`amount` is a **JSON number in whole-token units**, rendered with
+`formatToken` and *not* scaled by `voteTokenDecimals`. `RevenueClaim.amount`
+is a `DOUBLE PRECISION` accounting column, the same family as `Stake.amount`
+(cf. `MyStakes`' `stakedAmount`, rendered unscaled). The
+decimal-string-for-u64/u128 rule in `indexerClient.ts`'s header governs a
+different path entirely: raw amounts read off an on-chain account, like
+`MyStakes`' `position.amount`, which *does* get scaled via `fromRawAmount`.
 
 ## Item semantics
 
@@ -93,14 +98,25 @@ Money is a *state*, not an event. If you saw "12 NEB claimable" yesterday and
 didn't claim, it must still be there today; watermark-filtering would silently
 hide unclaimed money the moment you opened the panel once.
 
+**Corrected during implementation.** The obvious formulation — distributed
+epochs the user has *no* `RevenueClaim` for — is wrong.
+`revenue.rs::settle_epoch` inserts exactly one `RevenueClaim` per participant
+*at settle time*, so that predicate excludes every epoch the user is actually
+owed from (permanently empty), and `RevenueEpoch.grossRevenue` is the whole
+app's revenue, not this user's share. Key off the user's **unclaimed
+`RevenueClaim`** instead — right set, right per-user amount, same
+"already-claimed epochs excluded" semantics:
+
 ```sql
-SELECT e.* FROM "RevenueEpoch" e
-JOIN "AppTag" at ON at."appId" = e."appId"
-JOIN "Stake" s  ON s."appTagId" = at.id AND s."userId" = $1 AND s.active
-WHERE e.distributed
-  AND NOT EXISTS (SELECT 1 FROM "RevenueClaim" c
-                  WHERE c."epochId" = e.id AND c."userId" = $1)
-GROUP BY e.id
+SELECT a.id, a.slug, a.name, a."iconUrl",
+       SUM(c.amount)::double precision AS amount, COUNT(*) AS epoch_count
+FROM "RevenueClaim" c
+JOIN "RevenueEpoch" e ON e.id = c."epochId"
+JOIN "App" a ON a.id = e."appId"
+WHERE c."userId" = $1 AND c.claimed = false AND e.distributed = true
+  AND EXISTS (SELECT 1 FROM "Stake" s JOIN "AppTag" at ON at.id = s."appTagId"
+              WHERE at."appId" = e."appId" AND s."userId" = $1 AND s.active)
+GROUP BY a.id, a.slug, a.name, a."iconUrl"
 ```
 
 One row per app, amounts summed, `epochCount` = epochs rolled into it. Links

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ConnectButton } from "@/components/ConnectButton";
+import { DigestBell } from "@/components/DigestBell";
 import { useUserLevel } from "@/hooks/useUserLevel";
 import { useWalletBalances } from "@/hooks/useWalletBalances";
 import { config } from "@/lib/config";
@@ -86,6 +87,11 @@ export function Navbar() {
               Lv {userLevel.level}
             </Link>
           )}
+          {/* Lives in the always-visible right cluster, not the md-only nav
+              or the mobile dropdown — "what changed since you were last
+              here" is worth surfacing at every width, and it renders
+              nothing at all until there's actually a digest to show. */}
+          {connected && <DigestBell />}
           {/* Hidden below sm: the widest, least-essential piece of header
               content — on a narrow phone with a wallet connected, the
               logo/wordmark + level chip + this + Connect button together

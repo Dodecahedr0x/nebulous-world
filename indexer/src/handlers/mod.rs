@@ -11,6 +11,7 @@
 
 pub mod ads;
 pub mod apps;
+pub mod digest;
 pub mod engine;
 pub mod find;
 pub mod platform;

@@ -130,6 +130,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .merge(crate::handlers::revenue::routes())
         .merge(crate::handlers::x402::routes())
         .merge(crate::handlers::xp::routes())
+        .merge(crate::handlers::digest::routes())
         .merge(crate::handlers::find::routes())
         .with_state(state)
 }

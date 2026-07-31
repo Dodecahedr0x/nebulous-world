@@ -24,6 +24,11 @@
 //! It lives inside the bin crate rather than `indexer/tests/` because there is
 //! no `[lib]` target to link against (A84).
 //!
+//! `TestDb`, `router_for`, `send`/`post` and `insert_app` are `pub(crate)` so
+//! later live-database tiers reuse this harness (same env var, same
+//! create-migrate-drop-per-test discipline, same sweep) instead of growing a
+//! second one — see `digest_integration.rs`.
+//!
 //! This module never modifies `find/**`, `handlers/find.rs` or migration 009;
 //! it only executes them. The guard-mutation battery that temporarily edits
 //! those files and restores them lives outside the source tree, in the build
@@ -96,14 +101,14 @@ fn database_url_for(admin_url: &str, db_name: &str) -> String {
 }
 
 /// A freshly created, freshly migrated database, owned by one test.
-struct TestDb {
+pub(crate) struct TestDb {
     name: String,
     admin: PgPool,
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl TestDb {
-    async fn create() -> TestDb {
+    pub(crate) async fn create() -> TestDb {
         let admin_url = admin_url();
         let admin = PgPoolOptions::new()
             .max_connections(1)
@@ -134,7 +139,7 @@ impl TestDb {
         TestDb { name, admin, pool }
     }
 
-    async fn destroy(self) {
+    pub(crate) async fn destroy(self) {
         self.pool.close().await;
         let _ = sqlx::query(&format!(
             r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
@@ -159,7 +164,7 @@ fn unwrap_api<T>(result: Result<T, ApiError>, what: &str) -> T {
 /// `.merge(crate::handlers::find::routes())` line in `api.rs` is under test too.
 /// `RpcClient::new_with_commitment` opens no connection, so the dummy url costs
 /// nothing; no test here reaches an RPC or DLMM path.
-fn router_for(pool: PgPool) -> Router {
+pub(crate) fn router_for(pool: PgPool) -> Router {
     crate::api::router(Arc::new(ApiState {
         pool,
         rpc: RpcClient::new_with_commitment(
@@ -174,7 +179,7 @@ fn router_for(pool: PgPool) -> Router {
     }))
 }
 
-async fn send(
+pub(crate) async fn send(
     router: &Router,
     method: &str,
     path: &str,
@@ -203,13 +208,13 @@ async fn send(
     (status, value)
 }
 
-async fn post(router: &Router, path: &str, body: Value) -> (StatusCode, Value) {
+pub(crate) async fn post(router: &Router, path: &str, body: Value) -> (StatusCode, Value) {
     send(router, "POST", path, Some(body)).await
 }
 
 /// `"App"."updatedAt"` is the one NOT NULL column with no default, so every
 /// insert must supply it.
-async fn insert_app(pool: &PgPool, id: &str, status: &str) {
+pub(crate) async fn insert_app(pool: &PgPool, id: &str, status: &str) {
     sqlx::query(
         r#"INSERT INTO "App" (id, slug, name, url, status, "updatedAt")
            VALUES ($1, $2, $3, 'https://example.com', $4, now())"#,

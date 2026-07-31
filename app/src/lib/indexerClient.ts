@@ -22,6 +22,8 @@ import { config } from "@/lib/config";
 import type {
   AppDTO,
   AppDetail,
+  DigestDTO,
+  DigestSeenResult,
   FindConfirmInput,
   FindNextInput,
   FindNextResult,
@@ -607,6 +609,22 @@ export async function fetchXpLeaderboard(limit = 10): Promise<XpLeaderboardEntry
     entries: XpLeaderboardEntry[];
   };
   return result.entries;
+}
+
+/** "Since you were last here" — claimable rewards, rank moves on staked
+    apps, and streak status, computed in one place by
+    indexer/src/handlers/digest.rs. `null` on a 404 (no such user), same
+    convention as fetchUserXp. Reward amounts arrive as decimal strings and
+    stay that way through the API route to the browser — see this file's
+    header. */
+export async function fetchDigest(userId: string): Promise<DigestDTO | null> {
+  return (await getOrNull(`/digest?userId=${encodeURIComponent(userId)}`)) as DigestDTO | null;
+}
+
+/** Advances the user's digest watermark to now, returning the new value.
+    Only the NEXT load is affected — nothing already on screen changes. */
+export async function markDigestSeen(userId: string): Promise<DigestSeenResult> {
+  return (await post("/digest/seen", { userId })) as DigestSeenResult;
 }
 
 export interface VisitorInfo {
