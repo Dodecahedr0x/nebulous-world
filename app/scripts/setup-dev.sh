@@ -73,7 +73,7 @@ if grep -q '^NEXT_PUBLIC_NEBULOUS_WORLD_PROGRAM_ID=' .env; then
   rm -f .env.bak
 fi
 
-if lsof -i ":$RPC_PORT" >/dev/null 2>&1; then
+if lsof -i ":$RPC_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   log "A Surfnet (or something else) is already running on port $RPC_PORT, reusing it"
 else
   # A premium datasource RPC (see .env.example) avoids the free public
@@ -223,7 +223,7 @@ log "Building the indexer"
 log "Ensuring local Postgres is up (the indexer needs it at startup)"
 bash scripts/ensure-postgres.sh
 
-if lsof -i ":$INDEXER_API_PORT" >/dev/null 2>&1; then
+if lsof -i ":$INDEXER_API_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   log "The indexer (or something else) is already running on port $INDEXER_API_PORT, reusing it"
 else
   log "Starting the indexer in the background (logs: $INDEXER_LOG)"
@@ -237,7 +237,10 @@ else
   # listening — grab its pid by port rather than cargo's, so teardown-dev.sh
   # can kill the right process even if cargo's wrapper has already exited.
   for _ in $(seq 1 60); do
-    INDEXER_PID="$(lsof -ti ":$INDEXER_API_PORT" 2>/dev/null || true)"
+    # -sTCP:LISTEN, so a client connected to 8090 can't get picked up here —
+    # that would write a second pid into the pid file and teardown-dev.sh's
+    # `kill "$pid"` would then choke on the multi-line value.
+    INDEXER_PID="$(lsof -ti ":$INDEXER_API_PORT" -sTCP:LISTEN 2>/dev/null || true)"
     [ -n "$INDEXER_PID" ] && break
     sleep 1
   done

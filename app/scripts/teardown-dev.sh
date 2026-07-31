@@ -24,8 +24,11 @@ stop_by_pid_or_port() {
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill "$pid"
     echo "  $label stopped (pid $pid)"
-  elif lsof -ti ":$port" >/dev/null 2>&1; then
-    lsof -ti ":$port" | xargs kill
+  # -sTCP:LISTEN matters: without it lsof also matches every *client* connected
+  # to the port — the Next.js dev server talking to the indexer on 8090, say —
+  # and this would kill those instead of the server that owns the port.
+  elif lsof -ti ":$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    lsof -ti ":$port" -sTCP:LISTEN | xargs kill
     echo "  $label stopped (found on port $port)"
   else
     echo "  $label not running"
