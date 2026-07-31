@@ -67,7 +67,6 @@ export default async function RankingsPage() {
         votesTrend={votesTrend}
         stakeTrend={stakeTrend}
         viewsTrend={viewsTrendPoints}
-        wide
       />
 
       <Suspense fallback={<div className="py-16 text-center text-slate-steel">Loading…</div>}>

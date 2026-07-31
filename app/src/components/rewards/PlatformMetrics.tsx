@@ -61,7 +61,7 @@ export function PlatformMetrics({
           revenue tile: 5 of 6 columns used) or 6 (Rewards, with the revenue
           tile: exact fit, and also exactly 2 even rows of 3 at the sm
           breakpoint either way). */}
-      <div className={cn("grid grid-cols-2 gap-4 sm:grid-cols-3", wide && "lg:grid-cols-6")}>
+      <div className={cn("grid grid-cols-2 gap-4 sm:grid-cols-5", wide && "lg:grid-cols-6")}>
         <MetricTrendCard label="Apps" value={formatNumber(stats.totalApps)} data={appsTrend} />
         <MetricTrendCard label="Tags" value={formatNumber(stats.totalTags)} data={tagsTrend} />
         <MetricTrendCard
